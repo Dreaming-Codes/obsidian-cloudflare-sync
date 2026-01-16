@@ -1,0 +1,29 @@
+name = "cloudflare-sync"
+main = "build/worker/index.js"
+compatibility_date = "2025-01-15"
+
+[build]
+command = "cargo install -q worker-build@^0.7 && worker-build --release"
+
+[[r2_buckets]]
+binding = "VAULT_STORAGE"
+bucket_name = "obsidian-vault-storage"
+
+[[durable_objects.bindings]]
+name = "DOCUMENT_DO"
+class_name = "DocumentDurableObject"
+
+[[durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DocumentDurableObject", "UserDurableObject"]
+
+[vars]
+BASE_URL = "https://sync.elysiumcraftrp.org"
+
+# Secrets (set via `wrangler secret put`):
+# - RESEND_API_KEY
+# - JWT_SECRET

@@ -1,0 +1,889 @@
+# Cloudflare Sync Plugin - Implementation Plan
+
+## Overview
+
+A real-time collaborative sync plugin for Obsidian using Cloudflare infrastructure:
+
+- **R2**: Long-term storage for all file types (markdown, attachments, etc.)
+- **Durable Objects**: Real-time sync coordination with WebSocket hibernation + SQLite
+- **Workers (Rust)**: API gateway, authentication, routing via `workers-rs`
+- **Resend**: Magic link email authentication
+
+## User Choices
+
+| Decision | Choice |
+|----------|--------|
+| Authentication | Magic Link (Email only) |
+| Collaboration Scope | Character-level CRDT (using yrs/Y.js) |
+| Platform Support | Desktop + Mobile |
+| Permission Model | Granular (Owner/Editor/Commenter/Viewer) |
+| Backend Language | Rust |
+| Server URL | User-configurable (default: `https://sync.elysiumcraftrp.org`) |
+| File Types | All files synced |
+| Storage Limits | None |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          OBSIDIAN PLUGIN (TypeScript)                    │
+│  ┌──────────────┐  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│  │ SyncManager  │  │ CRDTEngine  │  │ WebSocket    │  │ SettingsTab  │ │
+│  │              │  │ (yjs)       │  │ Client       │  │              │ │
+│  └──────────────┘  └─────────────┘  └──────────────┘  └──────────────┘ │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │ WebSocket + REST
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    CLOUDFLARE WORKER (Rust via workers-rs)               │
+│  ┌──────────────┐  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│  │ Auth         │  │ Router      │  │ Middleware   │  │ Validator    │ │
+│  │ (Magic Link) │  │             │  │ (JWT/Perms)  │  │              │ │
+│  └──────────────┘  └─────────────┘  └──────────────┘  └──────────────┘ │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │
+         ┌───────────────────────────┼───────────────────────────┐
+         │                           │                           │
+         ▼                           ▼                           ▼
+┌────────────────────┐  ┌────────────────────────┐  ┌─────────────────────┐
+│   DURABLE OBJECT   │  │     DURABLE OBJECT     │  │         R2          │
+│   (Per Document)   │  │       (Per User)       │  │    (File Storage)   │
+│ ┌────────────────┐ │  │ ┌────────────────────┐ │  │ ┌─────────────────┐ │
+│ │ yrs Doc State  │ │  │ │ Session Management │ │  │ │ File Content    │ │
+│ │ Awareness      │ │  │ │ Permissions Cache  │ │  │ │ File Versions   │ │
+│ │ WS Connections │ │  │ │ Magic Link Tokens  │ │  │ │ All File Types  │ │
+│ │ Collaborators  │ │  │ └────────────────────┘ │  │ └─────────────────┘ │
+│ │ Comments       │ │  └────────────────────────┘  └─────────────────────┘
+│ └────────────────┘ │
+│     SQLite DB      │
+└────────────────────┘
+```
+
+---
+
+## Project Structure
+
+```
+cloudflare-sync/
+├── src/                           # Obsidian Plugin (TypeScript)
+│   ├── main.ts                    # Plugin entry, lifecycle
+│   ├── settings.ts                # Settings interface & tab
+│   ├── types.ts                   # Shared TypeScript types
+│   ├── sync/
+│   │   ├── SyncManager.ts         # Orchestrates all sync
+│   │   ├── CRDTDocument.ts        # Y.js document wrapper
+│   │   ├── WebSocketClient.ts     # WS with reconnection
+│   │   └── FileWatcher.ts         # Vault change detection
+│   ├── auth/
+│   │   ├── AuthManager.ts         # JWT storage, refresh
+│   │   └── MagicLinkModal.ts      # Login UI
+│   ├── sharing/
+│   │   ├── ShareManager.ts        # Permission management
+│   │   └── ShareModal.ts          # Share UI
+│   ├── comments/
+│   │   ├── CommentManager.ts      # Comment CRUD
+│   │   └── CommentView.ts         # Inline display
+│   └── ui/
+│       ├── StatusBar.ts           # Sync status
+│       └── NotificationManager.ts # Toast notifications
+│
+├── worker/                        # Cloudflare Worker (Rust)
+│   ├── .cargo/
+│   │   └── config.toml            # WASM target configuration
+│   ├── Cargo.toml
+│   ├── wrangler.toml
+│   └── src/
+│       ├── lib.rs                 # Entry point, router
+│       ├── auth/
+│       │   ├── mod.rs
+│       │   ├── magic_link.rs      # Token gen/verify
+│       │   ├── jwt.rs             # JWT encode/decode
+│       │   └── resend.rs          # Email API client
+│       ├── durable_objects/
+│       │   ├── mod.rs
+│       │   ├── document.rs        # DocumentDO
+│       │   └── user.rs            # UserDO
+│       ├── routes/
+│       │   ├── mod.rs
+│       │   ├── auth.rs            # /auth/*
+│       │   ├── files.rs           # /files/*
+│       │   ├── share.rs           # /share/*
+│       │   └── websocket.rs       # /ws/*
+│       ├── models/
+│       │   ├── mod.rs
+│       │   ├── user.rs
+│       │   ├── file.rs
+│       │   ├── share.rs
+│       │   └── comment.rs
+│       ├── sync/
+│       │   ├── mod.rs
+│       │   ├── protocol.rs        # WS message types
+│       │   └── awareness.rs       # Cursor presence
+│       └── utils/
+│           ├── mod.rs
+│           ├── error.rs
+│           ├── response.rs        # JSON response helpers
+│           ├── r2.rs
+│           └── crypto.rs
+│
+├── manifest.json
+├── package.json
+├── esbuild.config.mjs
+├── tsconfig.json
+└── PLAN.md                        # This file
+```
+
+---
+
+## Rust Worker Configuration
+
+### Cargo.toml
+
+Use Rust 2024 edition and latest crate versions. Dependencies will be added via `cargo add` to ensure latest versions:
+
+```toml
+[package]
+name = "cloudflare-sync-worker"
+version = "0.1.0"
+edition = "2024"
+authors = ["DreamingCodes <me@dreaming.codes>"]
+
+[lib]
+crate-type = ["cdylib"]
+
+# Aggressive release optimization for minimal WASM size
+[profile.release]
+lto = "fat"              # Full link-time optimization
+opt-level = "s"          # Optimize for size
+panic = "abort"          # No unwinding, smaller binary
+strip = true             # Remove symbols
+codegen-units = 1        # Single codegen unit for better optimization
+overflow-checks = false  # Disable overflow checks for performance
+
+# WASM-specific optimization
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O4", "--enable-simd"]
+
+[dependencies]
+# Core worker dependencies (add via: cargo add worker worker-macros)
+worker = "0.7"
+worker-macros = "0.7"
+
+# Serialization (add via: cargo add serde --features derive)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CRDT (add via: cargo add yrs)
+yrs = "0.21"
+
+# Auth (add via: cargo add jsonwebtoken)
+jsonwebtoken = "9"
+
+# Crypto (add via: cargo add sha2 hex base64)
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+
+# Utilities (add via: cargo add uuid --features v4,serde)
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde", "wasmbind"] }
+thiserror = "2"
+futures = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+```
+
+### .cargo/config.toml
+
+Enable SIMD for better WASM performance:
+
+```toml
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
+```
+
+### wrangler.toml
+
+```toml
+name = "cloudflare-sync"
+main = "build/index.js"
+compatibility_date = "2025-01-15"
+
+[build]
+command = "cargo install -q worker-build@^0.7 && worker-build --release"
+
+[[r2_buckets]]
+binding = "VAULT_STORAGE"
+bucket_name = "obsidian-vault-storage"
+
+[[durable_objects.bindings]]
+name = "DOCUMENT_DO"
+class_name = "DocumentDurableObject"
+
+[[durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DocumentDurableObject", "UserDurableObject"]
+
+# Secrets (set via `wrangler secret put`)
+# - RESEND_API_KEY
+# - JWT_SECRET
+```
+
+---
+
+## Rust Best Practices (from example project)
+
+### 1. JSON Response Helper
+
+Create a reusable response helper for consistent API responses:
+
+```rust
+// src/utils/response.rs
+use serde::Serialize;
+use worker::*;
+
+pub fn json_response<T: Serialize>(data: &T, status: u16) -> Result<Response> {
+    let body = serde_json::to_string(data)?;
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/json")?;
+
+    Ok(Response::builder()
+        .with_status(status)
+        .with_headers(headers)
+        .fixed(body.into_bytes()))
+}
+```
+
+### 2. Structured Error Responses
+
+Use structured error types for consistent error handling:
+
+```rust
+// src/utils/error.rs
+use serde::Serialize;
+
+#[derive(Debug, Serialize)]
+pub struct ApiError {
+    pub error: ApiErrorDetail,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApiErrorDetail {
+    pub code: String,
+    pub message: String,
+    pub status: u16,
+}
+
+impl ApiError {
+    pub fn new(code: &str, message: &str, status: u16) -> Self {
+        Self {
+            error: ApiErrorDetail {
+                code: code.to_string(),
+                message: message.to_string(),
+                status,
+            },
+        }
+    }
+
+    pub fn not_found(message: &str) -> Self {
+        Self::new("NOT_FOUND", message, 404)
+    }
+
+    pub fn unauthorized(message: &str) -> Self {
+        Self::new("UNAUTHORIZED", message, 401)
+    }
+
+    pub fn bad_request(message: &str) -> Self {
+        Self::new("BAD_REQUEST", message, 400)
+    }
+
+    pub fn internal(message: &str) -> Self {
+        Self::new("INTERNAL_ERROR", message, 500)
+    }
+}
+```
+
+### 3. JsError Conversion Pattern
+
+When working with web_sys APIs, use this pattern:
+
+```rust
+let headers = web_sys::Headers::new()
+    .map_err(|e| Error::JsError(format!("{:?}", e)))?;
+headers.set("Content-Type", "application/json")
+    .map_err(|e| Error::JsError(format!("{:?}", e)))?;
+```
+
+### 4. Request Validation with Helper Methods
+
+Add validation methods directly on request types:
+
+```rust
+impl SomeRequest {
+    pub fn is_valid(&self) -> bool {
+        !self.required_field.is_empty()
+    }
+
+    pub fn has_optional_data(&self) -> bool {
+        self.optional_field.as_ref().map(|f| !f.is_empty()).unwrap_or(false)
+    }
+}
+```
+
+### 5. Graceful Degradation Pattern
+
+Chain fallback behaviors for resilience:
+
+```rust
+// Try primary method first
+if let Ok(Some(result)) = try_primary_method(&request).await {
+    return json_response(&result, 200);
+}
+
+// Fall back to secondary method
+if let Some(result) = try_secondary_method(&context) {
+    return json_response(&result, 200);
+}
+
+// Final fallback: error response
+json_response(&ApiError::not_found("Resource not found"), 404)
+```
+
+### 6. Entry Point Pattern
+
+Use `#[event(fetch)]` macro for the main handler:
+
+```rust
+use worker::*;
+
+#[event(fetch)]
+async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    // Router or direct handling
+    Router::new()
+        .get("/health", |_, _| Response::ok("OK"))
+        .post_async("/api/endpoint", handle_endpoint)
+        .run(req, env)
+        .await
+}
+```
+
+---
+
+## Implementation Phases
+
+### Phase 1: Rust Worker Scaffold
+**Goal**: Basic Rust worker with routing, health check, CORS
+
+**Tasks**:
+1. Create `worker/` directory structure
+2. Initialize Cargo project with `cargo init --lib`
+3. Configure `Cargo.toml` with edition 2024 and optimizations
+4. Add dependencies via `cargo add`:
+   ```bash
+   cargo add worker worker-macros
+   cargo add serde --features derive
+   cargo add serde_json
+   cargo add thiserror
+   ```
+5. Create `.cargo/config.toml` with SIMD flags
+6. Configure `wrangler.toml` with R2 and DO bindings
+7. Implement basic router with:
+   - `GET /health` - Health check endpoint
+   - CORS headers middleware
+   - JSON response helpers
+   - Error handling utilities
+8. Deploy and test basic connectivity
+
+**Key Files**:
+- `worker/src/lib.rs` - Entry point with router
+- `worker/src/utils/mod.rs` - Utility modules
+- `worker/src/utils/response.rs` - JSON response helper
+- `worker/src/utils/error.rs` - Error types
+
+**Commit**: `feat(worker): initial Rust worker scaffold with routing`
+
+---
+
+### Phase 2: Authentication - Magic Link
+**Goal**: Passwordless email authentication via Resend
+
+**Add Dependencies**:
+```bash
+cargo add jsonwebtoken
+cargo add sha2 hex base64
+cargo add uuid --features v4,serde
+cargo add chrono --features serde,wasmbind
+```
+
+**Server Routes**:
+- `POST /auth/magic-link` - Generate token, send email
+- `GET /auth/verify?token=xxx` - Verify token, return JWT
+- `POST /auth/refresh` - Refresh expiring JWT
+- `POST /auth/logout` - Invalidate session
+
+**UserDO SQLite Schema**:
+```sql
+CREATE TABLE users (
+  id TEXT PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  device_info TEXT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE magic_links (
+  token_hash TEXT PRIMARY KEY,
+  email TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used INTEGER DEFAULT 0
+);
+```
+
+**Resend Integration**:
+```rust
+// src/auth/resend.rs
+async fn send_magic_link_email(email: &str, token: &str, env: &Env) -> Result<()> {
+    let api_key = env.secret("RESEND_API_KEY")?.to_string();
+    let base_url = env.var("BASE_URL")?.to_string();
+    
+    let body = serde_json::json!({
+        "from": "Cloudflare Sync <noreply@elysiumcraftrp.org>",
+        "to": [email],
+        "subject": "Sign in to Cloudflare Sync",
+        "html": format!(
+            "<p>Click <a href=\"{}/auth/verify?token={}\">here</a> to sign in.</p>",
+            base_url, token
+        )
+    });
+    
+    // Use web_sys fetch pattern from example
+    // ...
+}
+```
+
+**Commit**: `feat(worker): magic link authentication with Resend and JWT`
+
+---
+
+### Phase 3: R2 File Storage
+**Goal**: File CRUD operations with versioning
+
+**R2 Bucket Structure**:
+```
+/{user_id}/
+  files/
+    {path_hash}/
+      content              # Current file content (any type)
+      meta.json            # { path, size, mtime, content_type, hash }
+      versions/
+        {timestamp}        # Historical versions
+```
+
+**Server Routes**:
+- `PUT /files/{path}` - Upload file (creates version)
+- `GET /files/{path}` - Download file
+- `DELETE /files/{path}` - Soft delete
+- `GET /files` - List all files with metadata
+- `GET /files/{path}/versions` - List versions
+- `GET /files/{path}/versions/{ts}` - Get specific version
+
+**File Metadata Model**:
+```rust
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMeta {
+    pub path: String,
+    pub size: u64,
+    pub mtime: i64,
+    pub content_type: String,
+    pub content_hash: String,
+    pub deleted: bool,
+}
+```
+
+**Commit**: `feat(worker): R2 file storage with versioning`
+
+---
+
+### Phase 4: Plugin Foundation
+**Goal**: Obsidian plugin with settings and auth UI
+
+**Tasks**:
+1. Update `manifest.json`:
+   - `id`: `cloudflare-sync`
+   - `name`: `Cloudflare Sync`
+   - `description`: Real-time collaborative sync using Cloudflare
+2. Create settings interface:
+   ```typescript
+   interface CloudflareSyncSettings {
+     serverUrl: string;        // default: https://sync.elysiumcraftrp.org
+     userEmail: string;        // read-only after auth
+     syncEnabled: boolean;
+     authToken: string | null; // JWT
+     tokenExpiry: number | null;
+   }
+   ```
+3. Create `SettingsTab` with:
+   - Server URL input
+   - Login/Logout button
+   - Sync enabled toggle
+   - Connection status display
+4. Create `MagicLinkModal`:
+   - Email input
+   - Send link button
+   - Waiting state with timer
+   - Success/error handling
+5. Create `AuthManager`:
+   - Store/retrieve JWT
+   - Auto-refresh before expiry
+   - Logout functionality
+6. Create `StatusBar` component
+
+**Commits**:
+- `feat(plugin): settings interface and tab`
+- `feat(plugin): magic link authentication modal`
+- `feat(plugin): auth manager with token refresh`
+
+---
+
+### Phase 5: Basic File Sync
+**Goal**: Upload/download files to R2 on changes
+
+**Tasks**:
+1. Create `FileWatcher`:
+   - Listen to vault events (create, modify, delete, rename)
+   - Debounce rapid changes
+   - Calculate file hashes
+2. Create `FileSync`:
+   - Upload changed files
+   - Download remote changes
+   - Handle binary files
+3. Implement sync on plugin load
+4. Add manual sync command
+
+**Commits**:
+- `feat(plugin): file watcher with change detection`
+- `feat(plugin): basic file sync with R2`
+
+---
+
+### Phase 6: Durable Objects Setup
+**Goal**: DocumentDO and UserDO with SQLite
+
+**Add Dependency**:
+```bash
+cargo add yrs
+```
+
+**DocumentDO Schema**:
+```sql
+CREATE TABLE doc_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  yrs_state BLOB,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE collaborators (
+  user_id TEXT PRIMARY KEY,
+  email TEXT NOT NULL,
+  permission TEXT NOT NULL,  -- owner/editor/commenter/viewer
+  added_at INTEGER NOT NULL
+);
+
+CREATE TABLE comments (
+  id TEXT PRIMARY KEY,
+  author_id TEXT NOT NULL,
+  author_email TEXT NOT NULL,
+  content TEXT NOT NULL,
+  position BLOB NOT NULL,    -- yrs RelativePosition
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER,
+  resolved INTEGER DEFAULT 0,
+  parent_id TEXT             -- for threading
+);
+```
+
+**Durable Object Pattern**:
+```rust
+use worker::*;
+
+#[durable_object]
+pub struct DocumentDurableObject {
+    state: State,
+    env: Env,
+}
+
+#[durable_object]
+impl DurableObject for DocumentDurableObject {
+    fn new(state: State, env: Env) -> Self {
+        Self { state, env }
+    }
+
+    async fn fetch(&mut self, req: Request) -> Result<Response> {
+        // Handle requests
+    }
+}
+```
+
+**Commits**:
+- `feat(worker): UserDO with session management`
+- `feat(worker): DocumentDO with SQLite state storage`
+
+---
+
+### Phase 7: Real-Time Sync (WebSocket + CRDT)
+**Goal**: Character-level collaboration using yrs
+
+**WebSocket Protocol**:
+```rust
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientMessage {
+    Subscribe { doc_id: String },
+    Unsubscribe { doc_id: String },
+    SyncStep1 { doc_id: String, state_vector: Vec<u8> },
+    SyncStep2 { doc_id: String, update: Vec<u8> },
+    Update { doc_id: String, update: Vec<u8> },
+    Awareness { doc_id: String, data: Vec<u8> },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServerMessage {
+    Subscribed { doc_id: String },
+    SyncStep1 { doc_id: String, state_vector: Vec<u8> },
+    SyncStep2 { doc_id: String, update: Vec<u8> },
+    Update { doc_id: String, update: Vec<u8> },
+    Awareness { doc_id: String, data: Vec<u8> },
+    Error { code: String, message: String },
+}
+```
+
+**Server Tasks**:
+1. Implement WebSocket upgrade in router
+2. Route connections to DocumentDO by doc_id
+3. In DocumentDO:
+   - Accept WebSocket with hibernation API
+   - Load yrs::Doc from SQLite on first connection
+   - Handle sync protocol messages
+   - Broadcast updates to all connected clients
+   - Save state to SQLite periodically
+   - Persist full state to R2 on last disconnect
+
+**Plugin Tasks**:
+1. Add `yjs` dependency
+2. Create `WebSocketClient`:
+   - Connect with exponential backoff
+   - Message serialization (binary)
+   - Heartbeat/ping-pong
+3. Create `CRDTDocument`:
+   - Wrap Y.Doc per open file
+   - Track local vs remote changes
+4. Integrate with Obsidian editor:
+   - Hook into editor change events
+   - Apply changes to Y.Doc
+   - Apply remote Y.Doc updates to editor
+5. Show collaborator cursors (awareness)
+
+**Commits**:
+- `feat(worker): WebSocket upgrade and routing`
+- `feat(worker): DocumentDO WebSocket handling with hibernation`
+- `feat(worker): yrs CRDT sync protocol`
+- `feat(plugin): WebSocket client with reconnection`
+- `feat(plugin): Y.js document wrapper`
+- `feat(plugin): editor integration with CRDT`
+
+---
+
+### Phase 8: Permissions & Sharing
+**Goal**: Granular file/folder sharing
+
+**Permission Model**:
+```rust
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Permission {
+    Owner,      // Full control
+    Editor,     // Read + write content + comments
+    Commenter,  // Read + add comments
+    Viewer,     // Read only
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareInvite {
+    pub id: String,
+    pub resource_path: String,
+    pub resource_type: ResourceType,  // File | Folder
+    pub owner_id: String,
+    pub invitee_email: String,
+    pub permission: Permission,
+    pub created_at: i64,
+    pub accepted_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourceType {
+    File,
+    Folder,
+}
+```
+
+**Server Routes**:
+- `POST /share` - Create invite, send email
+- `GET /shares` - List shares I created
+- `GET /shared-with-me` - Shares received
+- `GET /share/{id}` - Get share details
+- `PUT /share/{id}` - Update permission
+- `DELETE /share/{id}` - Revoke
+- `POST /share/{id}/accept` - Accept invite
+
+**Permission Checking**:
+- Middleware checks permission before file operations
+- Folder permissions cascade to children
+- Cache in UserDO for performance
+
+**Plugin Tasks**:
+1. Create `ShareModal`:
+   - Add collaborator by email
+   - Permission dropdown
+   - List current collaborators
+2. Context menu "Share..." on files/folders
+3. Sidebar section for shared items
+4. Visual indicators (icons) for shared files
+
+**Commits**:
+- `feat(worker): permission model and share routes`
+- `feat(worker): permission checking middleware`
+- `feat(plugin): share modal and UI`
+
+---
+
+### Phase 9: Comments System
+**Goal**: Inline comments synced via CRDT
+
+**Comment Features**:
+- Create comment at cursor position
+- Edit/delete own comments
+- Resolve/unresolve comments
+- Threaded replies
+- Highlight commented text
+
+**Markdown Fallback** (for viewers without plugin):
+```markdown
+Text with comment.[^comment-abc123]
+
+[^comment-abc123]: **user@example.com** (2026-01-15):
+  This needs more detail.
+```
+
+**Plugin Tasks**:
+1. Create `CommentManager`
+2. Create comment popover UI
+3. Highlight text with comments
+4. Sync comments via Y.js
+
+**Commits**:
+- `feat(worker): comment storage in DocumentDO`
+- `feat(plugin): comment system with inline UI`
+
+---
+
+### Phase 10: Offline Support & Polish
+**Goal**: Work offline, graceful error handling
+
+**Offline Support**:
+1. Queue operations when disconnected
+2. Store pending changes in plugin data
+3. Sync on reconnect
+4. Visual offline indicator
+
+**Polish**:
+1. Comprehensive error messages
+2. Loading states throughout
+3. Debounce expensive operations
+4. Lazy-load Y.js
+5. Mobile testing
+6. Performance profiling
+
+**Commits**:
+- `feat(plugin): offline support with operation queue`
+- `fix: error handling and UX polish`
+- `feat(plugin): mobile compatibility`
+
+---
+
+## API Endpoints Summary
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/health` | Health check | No |
+| POST | `/auth/magic-link` | Request magic link | No |
+| GET | `/auth/verify` | Verify magic link | No |
+| POST | `/auth/refresh` | Refresh JWT | Yes |
+| POST | `/auth/logout` | Logout | Yes |
+| GET | `/files` | List all files | Yes |
+| GET | `/files/{path}` | Download file | Yes |
+| PUT | `/files/{path}` | Upload file | Yes |
+| DELETE | `/files/{path}` | Delete file | Yes |
+| GET | `/files/{path}/versions` | List versions | Yes |
+| POST | `/share` | Create share | Yes |
+| GET | `/shares` | List my shares | Yes |
+| GET | `/shared-with-me` | Shares received | Yes |
+| PUT | `/share/{id}` | Update share | Yes |
+| DELETE | `/share/{id}` | Revoke share | Yes |
+| POST | `/share/{id}/accept` | Accept invite | Yes |
+| WS | `/ws` | WebSocket endpoint | Yes |
+
+---
+
+## Commit Strategy
+
+Each phase produces 1-3 focused commits:
+- Prefix: `feat(worker):` or `feat(plugin):` or `fix:`
+- Small, atomic changes
+- Working state after each commit
+- Run build before committing
+
+---
+
+## Implementation Order
+
+1. **Phase 1**: Worker scaffold (foundation)
+2. **Phase 2**: Authentication (required for everything)
+3. **Phase 3**: R2 storage (basic sync)
+4. **Phase 4**: Plugin foundation (connect to backend)
+5. **Phase 5**: Basic file sync (MVP functionality)
+6. **Phase 6**: Durable Objects (prepare for real-time)
+7. **Phase 7**: Real-time CRDT sync (core feature)
+8. **Phase 8**: Sharing & permissions
+9. **Phase 9**: Comments
+10. **Phase 10**: Polish & offline
+
+---
+
+## Notes
+
+- Server URL is user-configurable, default: `https://sync.elysiumcraftrp.org`
+- All file types are synced (not just markdown)
+- No storage limits implemented
+- Mobile support is a requirement
+- yrs (Rust) on server, yjs (JS) on client - they are wire-compatible
+- Use `cargo add` to add dependencies (ensures latest versions)
+- Rust edition 2024 for latest language features
+- Aggressive WASM optimization for minimal bundle size
