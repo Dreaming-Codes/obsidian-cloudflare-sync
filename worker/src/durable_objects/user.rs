@@ -6,7 +6,7 @@ use worker::{SqlCursor, *};
 
 use crate::auth::{JwtManager, MagicLinkManager};
 use crate::models::{
-    CreateShareRequest, ListSharesResponse, ResourceType, ShareInvite, SharePermission,
+    CreateShareRequest, FileMeta, ListFilesResponse, ListSharesResponse, ResourceType, ShareInvite, SharePermission,
     ShareResponse, UpdateShareRequest,
 };
 use crate::utils::{json_ok, ApiError};
@@ -58,6 +58,22 @@ CREATE INDEX IF NOT EXISTS idx_shares_owner_id ON shares(owner_id);
 CREATE INDEX IF NOT EXISTS idx_shares_invitee_email ON shares(invitee_email);
 CREATE INDEX IF NOT EXISTS idx_shares_invitee_id ON shares(invitee_id);
 CREATE INDEX IF NOT EXISTS idx_shares_resource_path ON shares(resource_path);
+
+CREATE TABLE IF NOT EXISTS files (
+    path TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mtime INTEGER NOT NULL,
+    content_type TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    deleted INTEGER DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id);
+CREATE INDEX IF NOT EXISTS idx_files_updated_at ON files(user_id, updated_at);
 "#;
 
 /// User data model.
@@ -170,6 +186,52 @@ pub struct RefreshTokenRequest {
     pub refresh_token: String,
 }
 
+/// SQL row for file query (uses snake_case from database).
+#[derive(Debug, Deserialize)]
+struct FileRow {
+    path: String,
+    user_id: String,
+    size: i64,
+    mtime: i64,
+    content_type: String,
+    content_hash: String,
+    deleted: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
+/// Request to upsert file metadata.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertFileRequest {
+    pub path: String,
+    pub size: u64,
+    pub mtime: i64,
+    pub content_type: String,
+    pub content_hash: String,
+}
+
+/// Request to delete file metadata.
+#[derive(Debug, Deserialize)]
+pub struct DeleteFileRequest {
+    pub path: String,
+    /// If true, permanently delete. If false, soft delete.
+    #[serde(default)]
+    pub hard_delete: bool,
+}
+
+/// Query params for listing files.
+#[derive(Debug, Deserialize)]
+pub struct ListFilesQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// If provided, only return files updated after this timestamp
+    #[serde(default)]
+    pub since: Option<i64>,
+}
+
 /// User Durable Object for managing user sessions and magic links.
 #[durable_object]
 pub struct UserDurableObject {
@@ -217,6 +279,10 @@ impl DurableObject for UserDurableObject {
                 self.handle_accept_share(req, share_id).await
             }
             (Method::Get, "/permissions") => self.handle_check_permission(req).await,
+            // File metadata routes
+            (Method::Get, "/files") => self.handle_list_files(req).await,
+            (Method::Put, "/files") => self.handle_upsert_file(req).await,
+            (Method::Delete, "/files") => self.handle_delete_file(req).await,
             _ => ApiError::not_found("Endpoint not found").into_response(),
         }
     }
@@ -932,5 +998,180 @@ impl UserDurableObject {
             });
         }
         Ok(shares)
+    }
+
+    // ============================================================================
+    // File Metadata Handlers
+    // ============================================================================
+
+    /// Handle listing files for a user.
+    async fn handle_list_files(&self, req: Request) -> Result<Response> {
+        let claims = match self.extract_claims(&req) {
+            Ok(c) => c,
+            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
+        };
+
+        // Parse query params
+        let url = req.url()?;
+        let limit = url
+            .query_pairs()
+            .find(|(k, _)| k == "limit")
+            .and_then(|(_, v)| v.parse::<u32>().ok())
+            .unwrap_or(1000);
+        let offset = url
+            .query_pairs()
+            .find(|(k, _)| k == "offset")
+            .and_then(|(_, v)| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let since = url
+            .query_pairs()
+            .find(|(k, _)| k == "since")
+            .and_then(|(_, v)| v.parse::<i64>().ok());
+
+        let cursor = if let Some(since_ts) = since {
+            self.state.storage().sql().exec(
+                "SELECT path, user_id, size, mtime, content_type, content_hash, deleted, created_at, updated_at 
+                 FROM files WHERE user_id = ?1 AND updated_at > ?2 ORDER BY updated_at ASC LIMIT ?3 OFFSET ?4",
+                vec![claims.sub.into(), since_ts.into(), (limit as i64).into(), (offset as i64).into()],
+            )?
+        } else {
+            self.state.storage().sql().exec(
+                "SELECT path, user_id, size, mtime, content_type, content_hash, deleted, created_at, updated_at 
+                 FROM files WHERE user_id = ?1 ORDER BY path ASC LIMIT ?2 OFFSET ?3",
+                vec![claims.sub.into(), (limit as i64).into(), (offset as i64).into()],
+            )?
+        };
+
+        let mut files = Vec::new();
+        for row in cursor.next::<FileRow>() {
+            let row = row?;
+            files.push(FileMeta {
+                path: row.path,
+                size: row.size as u64,
+                mtime: row.mtime,
+                content_type: row.content_type,
+                content_hash: row.content_hash,
+                deleted: row.deleted != 0,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            });
+        }
+
+        // Check if there are more files
+        let has_more = files.len() == limit as usize;
+
+        json_ok(&ListFilesResponse {
+            files,
+            cursor: None, // We use offset-based pagination
+            has_more,
+        })
+    }
+
+    /// Handle upserting file metadata.
+    async fn handle_upsert_file(&self, mut req: Request) -> Result<Response> {
+        let claims = match self.extract_claims(&req) {
+            Ok(c) => c,
+            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
+        };
+
+        let body: UpsertFileRequest = req.json().await?;
+        let now = chrono::Utc::now().timestamp();
+
+        // Check if file exists
+        let cursor = self.state.storage().sql().exec(
+            "SELECT created_at FROM files WHERE user_id = ?1 AND path = ?2",
+            vec![claims.sub.clone().into(), body.path.clone().into()],
+        )?;
+
+        #[derive(Debug, Deserialize)]
+        struct ExistsRow {
+            created_at: i64,
+        }
+        let existing: Option<ExistsRow> = cursor.next::<ExistsRow>().next().transpose()?;
+
+        if let Some(existing_row) = existing {
+            // Update existing file
+            self.state.storage().sql().exec(
+                "UPDATE files SET size = ?1, mtime = ?2, content_type = ?3, content_hash = ?4, deleted = 0, updated_at = ?5 
+                 WHERE user_id = ?6 AND path = ?7",
+                vec![
+                    (body.size as i64).into(),
+                    body.mtime.into(),
+                    body.content_type.clone().into(),
+                    body.content_hash.clone().into(),
+                    now.into(),
+                    claims.sub.into(),
+                    body.path.clone().into(),
+                ],
+            )?;
+
+            json_ok(&FileMeta {
+                path: body.path,
+                size: body.size,
+                mtime: body.mtime,
+                content_type: body.content_type,
+                content_hash: body.content_hash,
+                deleted: false,
+                created_at: existing_row.created_at,
+                updated_at: now,
+            })
+        } else {
+            // Insert new file
+            self.state.storage().sql().exec(
+                "INSERT INTO files (path, user_id, size, mtime, content_type, content_hash, deleted, created_at, updated_at) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)",
+                vec![
+                    body.path.clone().into(),
+                    claims.sub.into(),
+                    (body.size as i64).into(),
+                    body.mtime.into(),
+                    body.content_type.clone().into(),
+                    body.content_hash.clone().into(),
+                    now.into(),
+                    now.into(),
+                ],
+            )?;
+
+            json_ok(&FileMeta {
+                path: body.path,
+                size: body.size,
+                mtime: body.mtime,
+                content_type: body.content_type,
+                content_hash: body.content_hash,
+                deleted: false,
+                created_at: now,
+                updated_at: now,
+            })
+        }
+    }
+
+    /// Handle deleting file metadata.
+    async fn handle_delete_file(&self, mut req: Request) -> Result<Response> {
+        let claims = match self.extract_claims(&req) {
+            Ok(c) => c,
+            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
+        };
+
+        let body: DeleteFileRequest = req.json().await?;
+        let now = chrono::Utc::now().timestamp();
+
+        if body.hard_delete {
+            // Permanently delete
+            self.state.storage().sql().exec(
+                "DELETE FROM files WHERE user_id = ?1 AND path = ?2",
+                vec![claims.sub.into(), body.path.clone().into()],
+            )?;
+        } else {
+            // Soft delete
+            self.state.storage().sql().exec(
+                "UPDATE files SET deleted = 1, updated_at = ?1 WHERE user_id = ?2 AND path = ?3",
+                vec![now.into(), claims.sub.into(), body.path.clone().into()],
+            )?;
+        }
+
+        json_ok(&serde_json::json!({
+            "success": true,
+            "path": body.path
+        }))
     }
 }

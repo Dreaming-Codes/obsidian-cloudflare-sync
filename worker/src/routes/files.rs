@@ -4,7 +4,7 @@ use serde::Deserialize;
 use worker::*;
 
 use crate::auth::JwtManager;
-use crate::models::{FileUploadResponse, ListFilesResponse};
+use crate::models::FileUploadResponse;
 use crate::utils::{json_ok, no_content, ApiError, R2Helper};
 
 /// Query parameters for listing files.
@@ -14,12 +14,21 @@ pub struct ListFilesQuery {
     pub cursor: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
+    #[serde(default)]
+    pub since: Option<i64>,
 }
 
 /// Authenticated user context.
 pub struct AuthContext {
     pub user_id: String,
     pub email: String,
+}
+
+/// Get the User Durable Object stub.
+fn get_user_do(env: &Env) -> Result<Stub> {
+    let namespace = env.durable_object("USER_DO")?;
+    let id = namespace.id_from_name("global-users")?;
+    id.get_stub()
 }
 
 /// Extract and validate JWT from Authorization header.
@@ -80,40 +89,42 @@ pub async fn handle_file_routes(req: Request, env: Env, path: &str) -> Result<Re
         }
         Method::Get => handle_get_file(env, auth, sub_path).await,
         Method::Put => handle_put_file(req, env, auth, sub_path).await,
-        Method::Delete => handle_delete_file(env, auth, sub_path).await,
+        Method::Delete => handle_delete_file(req, env, auth, sub_path).await,
         _ => ApiError::not_found("File endpoint not found").into_response(),
     }
 }
 
 /// GET /files - List all files for the authenticated user.
-async fn handle_list_files(req: Request, env: Env, auth: AuthContext) -> Result<Response> {
+/// Uses User DO SQLite for fast metadata queries.
+async fn handle_list_files(req: Request, env: Env, _auth: AuthContext) -> Result<Response> {
     let url = req.url()?;
-    let query: ListFilesQuery = url
-        .query_pairs()
-        .fold(ListFilesQuery { cursor: None, limit: None }, |mut q, (k, v)| {
-            match k.as_ref() {
-                "cursor" => q.cursor = Some(v.to_string()),
-                "limit" => q.limit = v.parse().ok(),
-                _ => {}
-            }
-            q
-        });
+    
+    // Build query string for DO
+    let mut query_parts = Vec::new();
+    for (k, v) in url.query_pairs() {
+        query_parts.push(format!("{}={}", k, v));
+    }
+    let query_string = if query_parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query_parts.join("&"))
+    };
 
-    let bucket = env.bucket("VAULT_STORAGE")?;
-    let r2 = R2Helper::new(&bucket);
+    // Forward the Authorization header to the DO
+    let auth_header = req.headers().get("Authorization")?.unwrap_or_default();
+    
+    let headers = Headers::new();
+    headers.set("Authorization", &auth_header)?;
 
-    let (files, cursor, has_more) = r2
-        .list_files(&auth.user_id, query.cursor, query.limit)
-        .await?;
+    let stub = get_user_do(&env)?;
+    let do_req = Request::new_with_init(
+        &format!("http://do/files{}", query_string),
+        RequestInit::new()
+            .with_method(Method::Get)
+            .with_headers(headers),
+    )?;
 
-    // Filter out deleted files from the list
-    let visible_files: Vec<_> = files.into_iter().filter(|f| !f.deleted).collect();
-
-    json_ok(&ListFilesResponse {
-        files: visible_files,
-        cursor,
-        has_more,
-    })
+    stub.fetch_with_request(do_req).await
 }
 
 /// GET /files/{path} - Download a file.
@@ -152,6 +163,7 @@ async fn handle_get_file(env: Env, auth: AuthContext, file_path: &str) -> Result
 }
 
 /// PUT /files/{path} - Upload or update a file.
+/// Stores content in R2 and metadata in User DO SQLite.
 async fn handle_put_file(mut req: Request, env: Env, auth: AuthContext, file_path: &str) -> Result<Response> {
     if file_path.is_empty() {
         return ApiError::bad_request("File path is required").into_response();
@@ -173,6 +185,12 @@ async fn handle_put_file(mut req: Request, env: Env, auth: AuthContext, file_pat
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
 
+    // Get auth header for DO request
+    let auth_header = req
+        .headers()
+        .get("Authorization")?
+        .unwrap_or_default();
+
     // Read body
     let content = req.bytes().await?;
 
@@ -187,6 +205,32 @@ async fn handle_put_file(mut req: Request, env: Env, auth: AuthContext, file_pat
         .put_content(&auth.user_id, clean_path, content.to_vec(), &content_type, mtime)
         .await?;
 
+    // Update metadata in User DO SQLite
+    let stub = get_user_do(&env)?;
+    let headers = Headers::new();
+    headers.set("Authorization", &auth_header)?;
+    headers.set("Content-Type", "application/json")?;
+
+    let upsert_body = serde_json::json!({
+        "path": meta.path,
+        "size": meta.size,
+        "mtime": meta.mtime,
+        "contentType": meta.content_type,
+        "contentHash": meta.content_hash,
+    });
+
+    let do_req = Request::new_with_init(
+        "http://do/files",
+        RequestInit::new()
+            .with_method(Method::Put)
+            .with_headers(headers)
+            .with_body(Some(upsert_body.to_string().into())),
+    )?;
+
+    // Fire and forget - don't block on DO response for upload speed
+    // The metadata will be eventually consistent
+    let _ = stub.fetch_with_request(do_req).await;
+
     json_ok(&FileUploadResponse {
         success: true,
         path: meta.path,
@@ -197,7 +241,8 @@ async fn handle_put_file(mut req: Request, env: Env, auth: AuthContext, file_pat
 }
 
 /// DELETE /files/{path} - Soft delete a file.
-async fn handle_delete_file(env: Env, auth: AuthContext, file_path: &str) -> Result<Response> {
+/// Deletes from R2 and marks as deleted in User DO SQLite.
+async fn handle_delete_file(req: Request, env: Env, auth: AuthContext, file_path: &str) -> Result<Response> {
     if file_path.is_empty() {
         return ApiError::bad_request("File path is required").into_response();
     }
@@ -205,12 +250,39 @@ async fn handle_delete_file(env: Env, auth: AuthContext, file_path: &str) -> Res
     // Remove leading slash if present
     let clean_path = file_path.strip_prefix('/').unwrap_or(file_path);
 
+    // Get auth header for DO request
+    let auth_header = req
+        .headers()
+        .get("Authorization")?
+        .unwrap_or_default();
+
     let bucket = env.bucket("VAULT_STORAGE")?;
     let r2 = R2Helper::new(&bucket);
 
     let deleted = r2.soft_delete(&auth.user_id, clean_path).await?;
 
     if deleted {
+        // Update metadata in User DO SQLite (soft delete)
+        let stub = get_user_do(&env)?;
+        let headers = Headers::new();
+        headers.set("Authorization", &auth_header)?;
+        headers.set("Content-Type", "application/json")?;
+
+        let delete_body = serde_json::json!({
+            "path": clean_path,
+            "hard_delete": false,
+        });
+
+        let do_req = Request::new_with_init(
+            "http://do/files",
+            RequestInit::new()
+                .with_method(Method::Delete)
+                .with_headers(headers)
+                .with_body(Some(delete_body.to_string().into())),
+        )?;
+
+        let _ = stub.fetch_with_request(do_req).await;
+
         no_content()
     } else {
         ApiError::not_found("File not found").into_response()

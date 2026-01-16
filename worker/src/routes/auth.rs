@@ -53,7 +53,7 @@ async fn handle_magic_link(mut req: Request, env: Env) -> Result<Response> {
     let stub = get_user_do(&env)?;
     
     let do_req = Request::new_with_init(
-        "https://fake-host/magic-link",
+        "http://do/magic-link",
         RequestInit::new()
             .with_method(Method::Post)
             .with_body(Some(serde_json::to_string(&body)?.into())),
@@ -84,7 +84,7 @@ async fn handle_magic_link(mut req: Request, env: Env) -> Result<Response> {
 
         // Store the magic link in the DO
         let store_req = Request::new_with_init(
-            "https://fake-host/magic-link",
+            "http://do/magic-link",
             RequestInit::new()
                 .with_method(Method::Post)
                 .with_body(Some(
@@ -128,7 +128,7 @@ async fn handle_verify(req: Request, env: Env) -> Result<Response> {
     let stub = get_user_do(&env)?;
     
     let do_req = Request::new_with_init(
-        "https://fake-host/verify",
+        "http://do/verify",
         RequestInit::new()
             .with_method(Method::Post)
             .with_body(Some(
@@ -151,7 +151,7 @@ async fn handle_refresh(mut req: Request, env: Env) -> Result<Response> {
     let body = req.text().await?;
     
     let do_req = Request::new_with_init(
-        "https://fake-host/refresh",
+        "http://do/refresh",
         RequestInit::new()
             .with_method(Method::Post)
             .with_body(Some(body.into())),
@@ -167,7 +167,7 @@ async fn handle_logout(mut req: Request, env: Env) -> Result<Response> {
     let body = req.text().await?;
     
     let do_req = Request::new_with_init(
-        "https://fake-host/logout",
+        "http://do/logout",
         RequestInit::new()
             .with_method(Method::Post)
             .with_body(Some(body.into())),
@@ -187,7 +187,7 @@ async fn handle_me(req: Request, env: Env) -> Result<Response> {
     headers.set("Authorization", &auth_header)?;
     
     let do_req = Request::new_with_init(
-        "https://fake-host/user",
+        "http://do/user",
         RequestInit::new()
             .with_method(Method::Get)
             .with_headers(headers),
@@ -206,7 +206,7 @@ async fn handle_delete_sessions(req: Request, env: Env) -> Result<Response> {
     headers.set("Authorization", &auth_header)?;
     
     let do_req = Request::new_with_init(
-        "https://fake-host/sessions",
+        "http://do/sessions",
         RequestInit::new()
             .with_method(Method::Delete)
             .with_headers(headers),
