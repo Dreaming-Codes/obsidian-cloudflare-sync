@@ -2,6 +2,7 @@ import { Plugin } from 'obsidian';
 import { AuthManager } from './auth/AuthManager';
 import { MagicLinkModal } from './auth/MagicLinkModal';
 import { CloudflareSyncSettingTab, CloudflareSyncSettings, DEFAULT_SETTINGS } from './settings';
+import { SyncManager } from './sync/SyncManager';
 import type { ConnectionStatus, SyncStatus } from './types';
 import { NotificationManager } from './ui/NotificationManager';
 import { StatusBar } from './ui/StatusBar';
@@ -19,6 +20,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 	authManager!: AuthManager;
 	notificationManager!: NotificationManager;
 	private statusBar!: StatusBar;
+	private syncManager: SyncManager | null = null;
 
 	// Connection and sync state
 	private connectionStatus: ConnectionStatus = 'disconnected';
@@ -124,18 +126,24 @@ export default class CloudflareSyncPlugin extends Plugin {
 			return;
 		}
 
+		if (this.syncManager) {
+			// Already running
+			return;
+		}
+
 		this.setConnectionStatus('connecting');
 
 		try {
-			// TODO: Initialize WebSocket connection
-			// TODO: Initialize file watcher
-			// TODO: Perform initial sync
+			// Initialize and start sync manager
+			this.syncManager = new SyncManager(this);
+			await this.syncManager.start();
 
 			this.setConnectionStatus('connected');
 			this.setSyncStatus('idle');
 			this.notificationManager.success('Sync started');
 		} catch (error) {
 			console.error('Failed to start sync:', error);
+			this.syncManager = null;
 			this.setConnectionStatus('error');
 			this.notificationManager.error('Failed to start sync');
 		}
@@ -145,9 +153,10 @@ export default class CloudflareSyncPlugin extends Plugin {
 	 * Stop the sync process
 	 */
 	async stopSync(): Promise<void> {
-		// TODO: Close WebSocket connection
-		// TODO: Stop file watcher
-		// TODO: Flush pending changes
+		if (this.syncManager) {
+			await this.syncManager.stop();
+			this.syncManager = null;
+		}
 
 		this.setConnectionStatus('disconnected');
 		this.setSyncStatus('idle');
@@ -162,22 +171,28 @@ export default class CloudflareSyncPlugin extends Plugin {
 			return;
 		}
 
-		this.setSyncStatus('syncing');
+		if (!this.syncManager) {
+			// Start sync first if not running
+			await this.startSync();
+			return;
+		}
+
 		this.statusBar?.showSyncing();
 
 		try {
-			// TODO: Perform full sync
-			// - List all remote files
-			// - Compare with local files
-			// - Upload/download as needed
-
-			this.setSyncStatus('idle');
+			await this.syncManager.performFullSync();
 			this.notificationManager.success('Sync completed');
 		} catch (error) {
 			console.error('Manual sync failed:', error);
-			this.setSyncStatus('error');
 			this.notificationManager.error('Sync failed');
 		}
+	}
+
+	/**
+	 * Get the sync manager instance
+	 */
+	getSyncManager(): SyncManager | null {
+		return this.syncManager;
 	}
 
 	// ============================================================================
@@ -207,6 +222,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 					return false;
 				}
 				if (!checking) {
+					this.stopSync();
 					this.authManager.logout();
 				}
 				return true;

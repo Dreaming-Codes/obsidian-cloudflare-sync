@@ -450,24 +450,23 @@ Obsidian plugin with settings and auth UI - **Committed**
 
 ---
 
-### Phase 5: Basic File Sync
-**Goal**: Upload/download files to R2 on changes
+### Phase 5: Basic File Sync ✅ COMPLETED
+Upload/download files to R2 on changes - **Committed**
 
-**Tasks**:
-1. Create `FileWatcher`:
-   - Listen to vault events (create, modify, delete, rename)
-   - Debounce rapid changes
-   - Calculate file hashes
-2. Create `FileSync`:
-   - Upload changed files
-   - Download remote changes
-   - Handle binary files
-3. Implement sync on plugin load
-4. Add manual sync command
+**Implemented**:
+- `src/utils/hash.ts` - SHA-256 file hashing utilities
+- `src/sync/FileWatcher.ts` - Vault change detection with debouncing
+- `src/sync/FileSync.ts` - Upload/download operations with R2
+- `src/sync/SyncManager.ts` - Orchestrates sync, handles conflicts
+- Updated `src/main.ts` - Integrated SyncManager lifecycle
 
-**Commits**:
-- `feat(plugin): file watcher with change detection`
-- `feat(plugin): basic file sync with R2`
+**Features**:
+- Automatic file watching (create, modify, delete, rename)
+- Debounced change detection (500ms)
+- Full sync on startup and every 5 minutes
+- Hash-based change detection
+- Support for all file types (binary and text)
+- Version support for file history
 
 ---
 
