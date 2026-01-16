@@ -16,7 +16,7 @@ mod routes;
 mod sync;
 mod utils;
 
-use routes::{handle_auth_routes, handle_file_routes, handle_websocket_upgrade};
+use routes::{handle_auth_routes, handle_file_routes, handle_share_routes, handle_websocket_upgrade};
 use utils::{json_ok, ApiError};
 
 // Re-export Durable Objects for wrangler
@@ -123,10 +123,9 @@ async fn route(req: Request, env: Env) -> Result<Response> {
             handle_file_routes(req, env, &path).await
         }
 
-        // Share routes (to be implemented in Phase 8)
-        (_, p) if p.starts_with("/share") => {
-            ApiError::new("NOT_IMPLEMENTED", "Share routes not yet implemented", 501)
-                .into_response()
+        // Share routes
+        (_, p) if p.starts_with("/share") || p == "/shares" || p == "/shared-with-me" || p == "/permissions" => {
+            handle_share_routes(req, &env).await
         }
 
         // WebSocket endpoint for real-time sync

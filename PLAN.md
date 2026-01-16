@@ -552,68 +552,39 @@ pub enum ServerMessage {
 
 ---
 
-### Phase 8: Permissions & Sharing
-**Goal**: Granular file/folder sharing
+### Phase 8: Permissions & Sharing ✅ COMPLETED
 
-**Permission Model**:
-```rust
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Permission {
-    Owner,      // Full control
-    Editor,     // Read + write content + comments
-    Commenter,  // Read + add comments
-    Viewer,     // Read only
-}
+**Implemented (Worker)**:
+- `worker/src/models/share.rs` - Share types (ShareInvite, SharePermission, ResourceType)
+- `worker/src/routes/share.rs` - Share route handler forwarding to UserDO
+- Added shares table to UserDO SQLite schema
+- Full CRUD handlers for shares in UserDO
+- Permission checking endpoint with folder inheritance
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareInvite {
-    pub id: String,
-    pub resource_path: String,
-    pub resource_type: ResourceType,  // File | Folder
-    pub owner_id: String,
-    pub invitee_email: String,
-    pub permission: Permission,
-    pub created_at: i64,
-    pub accepted_at: Option<i64>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
-#[serde(rename_all = "lowercase")]
-pub enum ResourceType {
-    File,
-    Folder,
-}
-```
+**Implemented (Plugin)**:
+- `src/types.ts` - Extended share types (CreateShareRequest, ListSharesResponse, etc.)
+- `src/sharing/ShareManager.ts` - API client for all share operations
+- `src/sharing/ShareModal.ts` - Modal UI for sharing files/folders
+- `src/sharing/ShareModal.ts` - PendingSharesModal for accepting invitations
+- `src/main.ts` - Integrated ShareManager, added commands and file menu
+- `styles.css` - Share modal styling
 
 **Server Routes**:
-- `POST /share` - Create invite, send email
-- `GET /shares` - List shares I created
-- `GET /shared-with-me` - Shares received
-- `GET /share/{id}` - Get share details
-- `PUT /share/{id}` - Update permission
-- `DELETE /share/{id}` - Revoke
-- `POST /share/{id}/accept` - Accept invite
+- `POST /share` - Create share invitation
+- `GET /shares` - List shares created by user
+- `GET /shared-with-me` - List shares received
+- `GET /share/{id}` - Get specific share
+- `PUT /share/{id}` - Update share permission
+- `DELETE /share/{id}` - Revoke share
+- `POST /share/{id}/accept` - Accept invitation
+- `GET /permissions?path=&owner_id=` - Check effective permission
 
-**Permission Checking**:
-- Middleware checks permission before file operations
-- Folder permissions cascade to children
-- Cache in UserDO for performance
-
-**Plugin Tasks**:
-1. Create `ShareModal`:
-   - Add collaborator by email
-   - Permission dropdown
-   - List current collaborators
-2. Context menu "Share..." on files/folders
-3. Sidebar section for shared items
-4. Visual indicators (icons) for shared files
-
-**Commits**:
-- `feat(worker): permission model and share routes`
-- `feat(worker): permission checking middleware`
-- `feat(plugin): share modal and UI`
+**Plugin Features**:
+- ShareModal for sharing files/folders with collaborators
+- Context menu "Share..." on files and folders
+- Commands: "Share current file", "View pending share invitations"
+- Permission selection dropdown (Editor/Commenter/Viewer)
+- List and manage existing shares
 
 ---
 

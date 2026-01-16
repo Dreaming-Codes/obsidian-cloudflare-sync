@@ -1,7 +1,9 @@
-import { MarkdownView, Plugin } from 'obsidian';
+import { MarkdownView, Plugin, TFile, TFolder, Menu } from 'obsidian';
 import { AuthManager } from './auth/AuthManager';
 import { MagicLinkModal } from './auth/MagicLinkModal';
 import { CloudflareSyncSettingTab, CloudflareSyncSettings, DEFAULT_SETTINGS } from './settings';
+import { ShareManager } from './sharing/ShareManager';
+import { PendingSharesModal, ShareModal } from './sharing/ShareModal';
 import { RealtimeSyncManager } from './sync/RealtimeSyncManager';
 import { SyncManager } from './sync/SyncManager';
 import type { ConnectionStatus, SyncStatus } from './types';
@@ -20,6 +22,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 	settings!: CloudflareSyncSettings;
 	authManager!: AuthManager;
 	notificationManager!: NotificationManager;
+	shareManager!: ShareManager;
 	private statusBar!: StatusBar;
 	private syncManager: SyncManager | null = null;
 	private realtimeSyncManager: RealtimeSyncManager | null = null;
@@ -35,6 +38,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 		// Initialize managers
 		this.authManager = new AuthManager(this);
 		this.notificationManager = new NotificationManager(this);
+		this.shareManager = new ShareManager(this);
 		this.statusBar = new StatusBar(this);
 
 		// Initialize auth (check token validity, schedule refresh)
@@ -48,6 +52,9 @@ export default class CloudflareSyncPlugin extends Plugin {
 
 		// Register commands
 		this.registerCommands();
+
+		// Register file menu integration
+		this.registerFileMenu();
 
 		// Start sync if enabled and authenticated
 		if (this.settings.syncEnabled && this.authManager.isAuthenticated()) {
@@ -351,5 +358,62 @@ export default class CloudflareSyncPlugin extends Plugin {
 				return true;
 			},
 		});
+
+		// Share current file command
+		this.addCommand({
+			id: 'share-current-file',
+			name: 'Share current file',
+			checkCallback: (checking) => {
+				if (!this.authManager.isAuthenticated()) {
+					return false;
+				}
+				const file = this.app.workspace.getActiveFile();
+				if (!file) {
+					return false;
+				}
+				if (!checking) {
+					new ShareModal(this, file).open();
+				}
+				return true;
+			},
+		});
+
+		// View pending shares command
+		this.addCommand({
+			id: 'view-pending-shares',
+			name: 'View pending share invitations',
+			checkCallback: (checking) => {
+				if (!this.authManager.isAuthenticated()) {
+					return false;
+				}
+				if (!checking) {
+					new PendingSharesModal(this).open();
+				}
+				return true;
+			},
+		});
+	}
+
+	/**
+	 * Register file menu integration for sharing.
+	 */
+	private registerFileMenu(): void {
+		// Add "Share" to file context menu
+		this.registerEvent(
+			this.app.workspace.on('file-menu', (menu, file) => {
+				if (!this.authManager.isAuthenticated()) {
+					return;
+				}
+
+				menu.addItem((item) => {
+					item
+						.setTitle('Share...')
+						.setIcon('share')
+						.onClick(() => {
+							new ShareModal(this, file).open();
+						});
+				});
+			})
+		);
 	}
 }

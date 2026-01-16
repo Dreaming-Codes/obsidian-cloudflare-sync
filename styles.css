@@ -150,3 +150,154 @@
 .cloudflare-sync-notice.notice-info {
 	border-left: 3px solid var(--text-accent);
 }
+
+/* ============================================================================
+   Share Modal
+   ============================================================================ */
+
+.cloudflare-sync-share-modal {
+	padding: 1em;
+}
+
+.cloudflare-sync-share-modal h2 {
+	margin-top: 0;
+	margin-bottom: 1em;
+}
+
+.cloudflare-sync-share-modal h3 {
+	margin-top: 1.5em;
+	margin-bottom: 0.5em;
+	font-size: var(--font-ui-medium);
+	color: var(--text-muted);
+}
+
+.share-add-section {
+	padding-bottom: 1em;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.share-existing-section {
+	margin-top: 0.5em;
+}
+
+.share-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0.75em;
+	margin-bottom: 0.5em;
+	background-color: var(--background-secondary);
+	border-radius: var(--radius-s);
+}
+
+.share-item-info {
+	display: flex;
+	align-items: center;
+	gap: 0.75em;
+}
+
+.share-email {
+	font-weight: var(--font-medium);
+}
+
+.share-status {
+	font-size: var(--font-ui-smaller);
+	padding: 0.2em 0.5em;
+	border-radius: var(--radius-s);
+}
+
+.share-status.pending {
+	background-color: var(--background-modifier-message);
+	color: var(--text-warning);
+}
+
+.share-item-controls {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+}
+
+.share-permission-select {
+	padding: 0.25em 0.5em;
+	border-radius: var(--radius-s);
+	border: 1px solid var(--background-modifier-border);
+	background-color: var(--background-primary);
+}
+
+.share-remove-btn {
+	padding: 0.25em 0.5em;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-error);
+	background: transparent;
+	border: 1px solid var(--text-error);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+}
+
+.share-remove-btn:hover {
+	background-color: var(--text-error);
+	color: var(--text-on-accent);
+}
+
+.share-loading {
+	text-align: center;
+	color: var(--text-muted);
+	padding: 2em;
+}
+
+/* ============================================================================
+   Pending Shares Modal
+   ============================================================================ */
+
+.cloudflare-sync-pending-modal {
+	padding: 1em;
+}
+
+.cloudflare-sync-pending-modal h2 {
+	margin-top: 0;
+	margin-bottom: 1em;
+}
+
+.pending-content {
+	max-height: 400px;
+	overflow-y: auto;
+}
+
+.pending-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0.75em;
+	margin-bottom: 0.5em;
+	background-color: var(--background-secondary);
+	border-radius: var(--radius-s);
+}
+
+.pending-item-info {
+	flex: 1;
+}
+
+.pending-description {
+	font-weight: var(--font-medium);
+	margin-bottom: 0.25em;
+}
+
+.pending-permission {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.pending-item-controls {
+	margin-left: 1em;
+}
+
+.pending-accept-btn {
+	padding: 0.5em 1em;
+}
+
+.pending-loading,
+.pending-empty {
+	text-align: center;
+	color: var(--text-muted);
+	padding: 2em;
+}

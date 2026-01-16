@@ -106,15 +106,46 @@ export type Permission = 'owner' | 'editor' | 'commenter' | 'viewer';
 
 export type ResourceType = 'file' | 'folder';
 
+export type PermissionSource = 'owner' | 'direct' | 'inherited';
+
 export interface ShareInvite {
 	id: string;
 	resourcePath: string;
 	resourceType: ResourceType;
 	ownerId: string;
+	ownerEmail: string;
 	inviteeEmail: string;
+	inviteeId: string | null;
 	permission: Permission;
 	createdAt: number;
 	acceptedAt: number | null;
+}
+
+export interface CreateShareRequest {
+	resourcePath: string;
+	resourceType: ResourceType;
+	inviteeEmail: string;
+	permission: Permission;
+}
+
+export interface UpdateShareRequest {
+	permission: Permission;
+}
+
+export interface ShareResponse {
+	success: boolean;
+	share?: ShareInvite;
+	message?: string;
+}
+
+export interface ListSharesResponse {
+	success: boolean;
+	shares: ShareInvite[];
+}
+
+export interface EffectivePermission {
+	permission: Permission;
+	source: PermissionSource;
 }
 
 // ============================================================================
