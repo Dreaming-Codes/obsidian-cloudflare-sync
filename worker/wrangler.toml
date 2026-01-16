@@ -1,6 +1,6 @@
 name = "cloudflare-sync"
-main = "build/worker/index.js"
-compatibility_date = "2025-01-15"
+main = "build/index.js"
+compatibility_date = "2025-12-30"
 
 [build]
 command = "cargo install -q worker-build@^0.7 && worker-build --release"
