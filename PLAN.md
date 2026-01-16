@@ -376,106 +376,28 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
 
 ## Implementation Phases
 
-### Phase 1: Rust Worker Scaffold
-**Goal**: Basic Rust worker with routing, health check, CORS
-
-**Tasks**:
-1. Create `worker/` directory structure
-2. Initialize Cargo project with `cargo init --lib`
-3. Configure `Cargo.toml` with edition 2024 and optimizations
-4. Add dependencies via `cargo add`:
-   ```bash
-   cargo add worker worker-macros
-   cargo add serde --features derive
-   cargo add serde_json
-   cargo add thiserror
-   ```
-5. Create `.cargo/config.toml` with SIMD flags
-6. Configure `wrangler.toml` with R2 and DO bindings
-7. Implement basic router with:
-   - `GET /health` - Health check endpoint
-   - CORS headers middleware
-   - JSON response helpers
-   - Error handling utilities
-8. Deploy and test basic connectivity
-
-**Key Files**:
-- `worker/src/lib.rs` - Entry point with router
-- `worker/src/utils/mod.rs` - Utility modules
-- `worker/src/utils/response.rs` - JSON response helper
-- `worker/src/utils/error.rs` - Error types
-
-**Commit**: `feat(worker): initial Rust worker scaffold with routing`
+### Phase 1: Rust Worker Scaffold ✅ COMPLETED
+Basic Rust worker with routing, health check, CORS - **Committed**
 
 ---
 
-### Phase 2: Authentication - Magic Link
-**Goal**: Passwordless email authentication via Resend
+### Phase 2: Authentication - Magic Link ✅ COMPLETED
+Passwordless email authentication via Resend - **Ready to commit**
 
-**Add Dependencies**:
-```bash
-cargo add jsonwebtoken
-cargo add sha2 hex base64
-cargo add uuid --features v4,serde
-cargo add chrono --features serde,wasmbind
-```
+**Implemented**:
+- `worker/src/auth/jwt.rs` - JWT encoding/decoding with Claims
+- `worker/src/auth/magic_link.rs` - Token generation with SHA256
+- `worker/src/auth/resend.rs` - Resend API client for emails
+- `worker/src/durable_objects/user.rs` - UserDO with SQLite schema
+- `worker/src/routes/auth.rs` - Auth route handlers
 
 **Server Routes**:
 - `POST /auth/magic-link` - Generate token, send email
 - `GET /auth/verify?token=xxx` - Verify token, return JWT
 - `POST /auth/refresh` - Refresh expiring JWT
 - `POST /auth/logout` - Invalidate session
-
-**UserDO SQLite Schema**:
-```sql
-CREATE TABLE users (
-  id TEXT PRIMARY KEY,
-  email TEXT UNIQUE NOT NULL,
-  created_at INTEGER NOT NULL
-);
-
-CREATE TABLE sessions (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  token_hash TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  device_info TEXT,
-  FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
-CREATE TABLE magic_links (
-  token_hash TEXT PRIMARY KEY,
-  email TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  used INTEGER DEFAULT 0
-);
-```
-
-**Resend Integration**:
-```rust
-// src/auth/resend.rs
-async fn send_magic_link_email(email: &str, token: &str, env: &Env) -> Result<()> {
-    let api_key = env.secret("RESEND_API_KEY")?.to_string();
-    let base_url = env.var("BASE_URL")?.to_string();
-    
-    let body = serde_json::json!({
-        "from": "Cloudflare Sync <noreply@elysiumcraftrp.org>",
-        "to": [email],
-        "subject": "Sign in to Cloudflare Sync",
-        "html": format!(
-            "<p>Click <a href=\"{}/auth/verify?token={}\">here</a> to sign in.</p>",
-            base_url, token
-        )
-    });
-    
-    // Use web_sys fetch pattern from example
-    // ...
-}
-```
-
-**Commit**: `feat(worker): magic link authentication with Resend and JWT`
+- `GET /auth/me` - Get current user
+- `DELETE /auth/sessions` - Logout all devices
 
 ---
 

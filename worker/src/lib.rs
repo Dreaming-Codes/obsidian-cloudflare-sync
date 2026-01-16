@@ -9,9 +9,16 @@
 use serde::Serialize;
 use worker::*;
 
+mod auth;
+mod durable_objects;
+mod routes;
 mod utils;
 
+use routes::handle_auth_routes;
 use utils::{json_ok, ApiError};
+
+// Re-export Durable Objects for wrangler
+pub use durable_objects::UserDurableObject;
 
 /// Health check response.
 #[derive(Debug, Serialize)]
@@ -27,7 +34,10 @@ fn cors_headers(mut response: Response, origin: Option<&str>) -> Response {
     // Allow the requesting origin, or * for development
     let allow_origin = origin.unwrap_or("*");
     let _ = headers.set("Access-Control-Allow-Origin", allow_origin);
-    let _ = headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    let _ = headers.set(
+        "Access-Control-Allow-Methods",
+        "GET, POST, PUT, DELETE, OPTIONS",
+    );
     let _ = headers.set(
         "Access-Control-Allow-Headers",
         "Content-Type, Authorization",
@@ -45,7 +55,7 @@ fn handle_preflight(origin: Option<&str>) -> Result<Response> {
 
 /// Main fetch handler.
 #[event(fetch)]
-async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // Get origin for CORS
     let origin = req.headers().get("Origin").ok().flatten();
     let origin_ref = origin.as_deref();
@@ -56,12 +66,13 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
     }
 
     // Route the request
-    let response = route(req, _env).await;
+    let response = route(req, env).await;
 
     // Apply CORS headers to all responses
     match response {
         Ok(resp) => Ok(cors_headers(resp, origin_ref)),
         Err(e) => {
+            console_error!("Request error: {:?}", e);
             let error_response = ApiError::internal(&e.to_string()).into_response()?;
             Ok(cors_headers(error_response, origin_ref))
         }
@@ -69,11 +80,11 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
 }
 
 /// Route requests to appropriate handlers.
-async fn route(req: Request, _env: Env) -> Result<Response> {
+async fn route(req: Request, env: Env) -> Result<Response> {
     let path = req.path();
     let method = req.method();
 
-    match (method, path.as_str()) {
+    match (method.clone(), path.as_str()) {
         // Health check
         (Method::Get, "/health") => {
             let response = HealthResponse {
@@ -99,18 +110,18 @@ async fn route(req: Request, _env: Env) -> Result<Response> {
             json_ok(&response)
         }
 
-        // Auth routes (to be implemented in Phase 2)
-        (_, path) if path.starts_with("/auth/") => {
-            ApiError::new("NOT_IMPLEMENTED", "Auth routes not yet implemented", 501).into_response()
+        // Auth routes
+        (_, p) if p.starts_with("/auth/") || p == "/auth" => {
+            handle_auth_routes(req, env, &path).await
         }
 
         // File routes (to be implemented in Phase 3)
-        (_, path) if path.starts_with("/files") => {
+        (_, p) if p.starts_with("/files") => {
             ApiError::new("NOT_IMPLEMENTED", "File routes not yet implemented", 501).into_response()
         }
 
         // Share routes (to be implemented in Phase 8)
-        (_, path) if path.starts_with("/share") => {
+        (_, p) if p.starts_with("/share") => {
             ApiError::new("NOT_IMPLEMENTED", "Share routes not yet implemented", 501)
                 .into_response()
         }
