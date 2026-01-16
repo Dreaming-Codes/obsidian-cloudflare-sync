@@ -377,12 +377,10 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
 ## Implementation Phases
 
 ### Phase 1: Rust Worker Scaffold ✅ COMPLETED
-Basic Rust worker with routing, health check, CORS - **Committed**
 
 ---
 
 ### Phase 2: Authentication - Magic Link ✅ COMPLETED
-Passwordless email authentication via Resend - **Committed**
 
 **Implemented**:
 - `worker/src/auth/jwt.rs` - JWT encoding/decoding with Claims
@@ -402,7 +400,6 @@ Passwordless email authentication via Resend - **Committed**
 ---
 
 ### Phase 3: R2 File Storage ✅ COMPLETED
-File CRUD operations with versioning - **Committed**
 
 **Implemented**:
 - `worker/src/models/file.rs` - FileMeta, FileVersion, response types
@@ -428,7 +425,6 @@ File CRUD operations with versioning - **Committed**
 ---
 
 ### Phase 4: Plugin Foundation ✅ COMPLETED
-Obsidian plugin with settings and auth UI - **Committed**
 
 **Implemented**:
 - `manifest.json` - Updated with cloudflare-sync plugin info
@@ -451,7 +447,6 @@ Obsidian plugin with settings and auth UI - **Committed**
 ---
 
 ### Phase 5: Basic File Sync ✅ COMPLETED
-Upload/download files to R2 on changes - **Committed**
 
 **Implemented**:
 - `src/utils/hash.ts` - SHA-256 file hashing utilities
@@ -470,13 +465,14 @@ Upload/download files to R2 on changes - **Committed**
 
 ---
 
-### Phase 6: Durable Objects Setup
-**Goal**: DocumentDO and UserDO with SQLite
+### Phase 6: Durable Objects Setup ✅ COMPLETED
 
-**Add Dependency**:
-```bash
-cargo add yrs
-```
+**Implemented**:
+- `worker/src/durable_objects/document.rs` - DocumentDO with SQLite schema
+- SQLite tables: `doc_state`, `collaborators`, `comments`
+- Permission model (Owner/Editor/Commenter/Viewer)
+- REST API handlers for state, collaborators, comments
+- Added `yrs` dependency to Cargo.toml
 
 **DocumentDO Schema**:
 ```sql
@@ -506,36 +502,25 @@ CREATE TABLE comments (
 );
 ```
 
-**Durable Object Pattern**:
-```rust
-use worker::*;
-
-#[durable_object]
-pub struct DocumentDurableObject {
-    state: State,
-    env: Env,
-}
-
-#[durable_object]
-impl DurableObject for DocumentDurableObject {
-    fn new(state: State, env: Env) -> Self {
-        Self { state, env }
-    }
-
-    async fn fetch(&mut self, req: Request) -> Result<Response> {
-        // Handle requests
-    }
-}
-```
-
-**Commits**:
-- `feat(worker): UserDO with session management`
-- `feat(worker): DocumentDO with SQLite state storage`
-
 ---
 
-### Phase 7: Real-Time Sync (WebSocket + CRDT)
-**Goal**: Character-level collaboration using yrs
+### Phase 7: Real-Time Sync (WebSocket + CRDT) ✅ COMPLETED
+
+**Implemented (Worker)**:
+- `worker/src/sync/protocol.rs` - WebSocket message types (ClientMessage, ServerMessage)
+- `worker/src/sync/awareness.rs` - Cursor/presence awareness structures
+- `worker/src/routes/websocket.rs` - WebSocket upgrade handler with JWT auth
+- WebSocket handling in DocumentDO with hibernation API
+- CRDT state management with yrs
+- Message broadcasting to connected clients
+
+**Implemented (Plugin)**:
+- `src/sync/WebSocketClient.ts` - WebSocket client with exponential backoff reconnection
+- `src/sync/CRDTDocument.ts` - Y.js document wrapper and manager
+- `src/sync/RealtimeSyncManager.ts` - Integrates WebSocket, CRDT, and Obsidian editor
+- `src/auth/AuthManager.ts` - Added `getValidToken()` for async token refresh
+- `src/types.ts` - WebSocket protocol types
+- `src/main.ts` - Integrated RealtimeSyncManager lifecycle
 
 **WebSocket Protocol**:
 ```rust
@@ -544,57 +529,26 @@ impl DurableObject for DocumentDurableObject {
 pub enum ClientMessage {
     Subscribe { doc_id: String },
     Unsubscribe { doc_id: String },
-    SyncStep1 { doc_id: String, state_vector: Vec<u8> },
-    SyncStep2 { doc_id: String, update: Vec<u8> },
-    Update { doc_id: String, update: Vec<u8> },
-    Awareness { doc_id: String, data: Vec<u8> },
+    SyncStep1 { doc_id: String, state_vector: String },  // base64
+    SyncStep2 { doc_id: String, update: String },        // base64
+    Update { doc_id: String, update: String },           // base64
+    Awareness { doc_id: String, data: String },          // base64
+    Ping,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     Subscribed { doc_id: String },
-    SyncStep1 { doc_id: String, state_vector: Vec<u8> },
-    SyncStep2 { doc_id: String, update: Vec<u8> },
-    Update { doc_id: String, update: Vec<u8> },
-    Awareness { doc_id: String, data: Vec<u8> },
+    SyncStep2 { doc_id: String, update: String },
+    Update { doc_id: String, update: String, from_user: String },
+    Awareness { doc_id: String, data: String, from_user: String },
+    UserJoined { doc_id: String, user_id: String, email: String },
+    UserLeft { doc_id: String, user_id: String },
+    Pong,
     Error { code: String, message: String },
 }
 ```
-
-**Server Tasks**:
-1. Implement WebSocket upgrade in router
-2. Route connections to DocumentDO by doc_id
-3. In DocumentDO:
-   - Accept WebSocket with hibernation API
-   - Load yrs::Doc from SQLite on first connection
-   - Handle sync protocol messages
-   - Broadcast updates to all connected clients
-   - Save state to SQLite periodically
-   - Persist full state to R2 on last disconnect
-
-**Plugin Tasks**:
-1. Add `yjs` dependency
-2. Create `WebSocketClient`:
-   - Connect with exponential backoff
-   - Message serialization (binary)
-   - Heartbeat/ping-pong
-3. Create `CRDTDocument`:
-   - Wrap Y.Doc per open file
-   - Track local vs remote changes
-4. Integrate with Obsidian editor:
-   - Hook into editor change events
-   - Apply changes to Y.Doc
-   - Apply remote Y.Doc updates to editor
-5. Show collaborator cursors (awareness)
-
-**Commits**:
-- `feat(worker): WebSocket upgrade and routing`
-- `feat(worker): DocumentDO WebSocket handling with hibernation`
-- `feat(worker): yrs CRDT sync protocol`
-- `feat(plugin): WebSocket client with reconnection`
-- `feat(plugin): Y.js document wrapper`
-- `feat(plugin): editor integration with CRDT`
 
 ---
 

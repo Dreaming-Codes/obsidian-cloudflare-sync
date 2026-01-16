@@ -13,12 +13,14 @@ mod auth;
 mod durable_objects;
 mod models;
 mod routes;
+mod sync;
 mod utils;
 
-use routes::{handle_auth_routes, handle_file_routes};
+use routes::{handle_auth_routes, handle_file_routes, handle_websocket_upgrade};
 use utils::{json_ok, ApiError};
 
 // Re-export Durable Objects for wrangler
+pub use durable_objects::DocumentDurableObject;
 pub use durable_objects::UserDurableObject;
 
 /// Health check response.
@@ -127,9 +129,9 @@ async fn route(req: Request, env: Env) -> Result<Response> {
                 .into_response()
         }
 
-        // WebSocket routes (to be implemented in Phase 7)
-        (_, "/ws") => {
-            ApiError::new("NOT_IMPLEMENTED", "WebSocket not yet implemented", 501).into_response()
+        // WebSocket endpoint for real-time sync
+        (Method::Get, "/ws") => {
+            handle_websocket_upgrade(req, env).await
         }
 
         // 404 for everything else

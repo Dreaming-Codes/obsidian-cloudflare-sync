@@ -17,7 +17,8 @@
 		"version": "bun version-bump.ts && git add manifest.json versions.json"
 	},
 	"dependencies": {
-		"obsidian": "latest"
+		"obsidian": "latest",
+		"yjs": "^13.6.29"
 	},
 	"devDependencies": {
 		"@types/bun": "latest",

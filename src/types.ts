@@ -133,3 +133,28 @@ export interface ConnectionEvent {
 	timestamp: number;
 	error?: string;
 }
+
+// ============================================================================
+// WebSocket Protocol
+// ============================================================================
+
+export type ClientMessage =
+	| { type: 'subscribe'; doc_id: string }
+	| { type: 'unsubscribe'; doc_id: string }
+	| { type: 'sync_step1'; doc_id: string; state_vector: string }
+	| { type: 'sync_step2'; doc_id: string; update: string }
+	| { type: 'update'; doc_id: string; update: string }
+	| { type: 'awareness'; doc_id: string; data: string }
+	| { type: 'ping'; timestamp: number };
+
+export type ServerMessage =
+	| { type: 'subscribed'; doc_id: string }
+	| { type: 'unsubscribed'; doc_id: string }
+	| { type: 'sync_step1'; doc_id: string; state_vector: string }
+	| { type: 'sync_step2'; doc_id: string; update: string }
+	| { type: 'update'; doc_id: string; update: string; from_user: string }
+	| { type: 'awareness'; doc_id: string; data: string; from_user: string }
+	| { type: 'error'; code: string; message: string }
+	| { type: 'pong'; timestamp: number }
+	| { type: 'user_joined'; doc_id: string; user_id: string; email: string }
+	| { type: 'user_left'; doc_id: string; user_id: string };

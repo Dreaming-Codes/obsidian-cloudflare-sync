@@ -30,3 +30,4 @@ thiserror = "2.0.17"
 uuid = { version = "1.19.0", features = ["v4", "serde", "js"] }
 worker = "0.7.4"
 worker-macros = "0.7.4"
+yrs = "0.21"

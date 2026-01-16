@@ -84,6 +84,33 @@ export class AuthManager {
 	}
 
 	/**
+	 * Get a valid JWT token, refreshing if necessary.
+	 * Returns null if not authenticated or refresh fails.
+	 */
+	async getValidToken(): Promise<string | null> {
+		const { authToken, tokenExpiry } = this.plugin.settings;
+
+		if (!authToken) {
+			return null;
+		}
+
+		// Check if token is still valid (with 1 minute buffer)
+		const now = Math.floor(Date.now() / 1000);
+		if (tokenExpiry && tokenExpiry > now + 60) {
+			return authToken;
+		}
+
+		// Token is expired or about to expire, try to refresh
+		const refreshed = await this.refreshToken();
+		if (refreshed) {
+			return this.plugin.settings.authToken;
+		}
+
+		// Refresh failed
+		return null;
+	}
+
+	/**
 	 * Request a magic link to be sent to the email
 	 */
 	async requestMagicLink(email: string): Promise<boolean> {

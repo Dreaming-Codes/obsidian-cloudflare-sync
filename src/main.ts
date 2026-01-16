@@ -1,7 +1,8 @@
-import { Plugin } from 'obsidian';
+import { MarkdownView, Plugin } from 'obsidian';
 import { AuthManager } from './auth/AuthManager';
 import { MagicLinkModal } from './auth/MagicLinkModal';
 import { CloudflareSyncSettingTab, CloudflareSyncSettings, DEFAULT_SETTINGS } from './settings';
+import { RealtimeSyncManager } from './sync/RealtimeSyncManager';
 import { SyncManager } from './sync/SyncManager';
 import type { ConnectionStatus, SyncStatus } from './types';
 import { NotificationManager } from './ui/NotificationManager';
@@ -21,6 +22,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 	notificationManager!: NotificationManager;
 	private statusBar!: StatusBar;
 	private syncManager: SyncManager | null = null;
+	private realtimeSyncManager: RealtimeSyncManager | null = null;
 
 	// Connection and sync state
 	private connectionStatus: ConnectionStatus = 'disconnected';
@@ -63,6 +65,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 
 		// Stop any active sync
 		this.stopSync();
+		this.stopRealtimeSync();
 	}
 
 	// ============================================================================
@@ -193,6 +196,87 @@ export default class CloudflareSyncPlugin extends Plugin {
 	 */
 	getSyncManager(): SyncManager | null {
 		return this.syncManager;
+	}
+
+	// ============================================================================
+	// Real-time Sync Operations
+	// ============================================================================
+
+	/**
+	 * Start real-time collaborative sync
+	 */
+	async startRealtimeSync(): Promise<void> {
+		if (!this.authManager.isAuthenticated()) {
+			return;
+		}
+
+		if (this.realtimeSyncManager) {
+			// Already running
+			return;
+		}
+
+		try {
+			this.realtimeSyncManager = new RealtimeSyncManager({
+				app: this.app,
+				serverUrl: this.settings.serverUrl,
+				getToken: () => this.authManager.getValidToken(),
+				onStatusChange: (status) => {
+					if (status === 'connected') {
+						this.notificationManager.success('Real-time sync connected');
+					} else if (status === 'error') {
+						this.notificationManager.error('Real-time sync disconnected');
+					}
+				},
+				onCollaboratorJoin: (_docId, _userId, email) => {
+					this.notificationManager.info(`${email} joined`);
+				},
+				onCollaboratorLeave: (_docId, userId) => {
+					this.notificationManager.info(`${userId} left`);
+				},
+			});
+
+			await this.realtimeSyncManager.enable();
+
+			// Register file open handler
+			this.registerEvent(
+				this.app.workspace.on('file-open', async (file) => {
+					if (file && this.realtimeSyncManager) {
+						await this.realtimeSyncManager.subscribeToFile(file);
+					}
+				})
+			);
+
+			// Register editor change handler
+			this.registerEvent(
+				this.app.workspace.on('editor-change', (editor, info) => {
+					// The editor-change event doesn't provide change details
+					// We'll need to handle this differently in a production app
+					// For now, we'll sync the full content periodically
+				})
+			);
+
+			console.log('[CloudflareSyncPlugin] Real-time sync started');
+		} catch (error) {
+			console.error('Failed to start real-time sync:', error);
+			this.realtimeSyncManager = null;
+		}
+	}
+
+	/**
+	 * Stop real-time collaborative sync
+	 */
+	stopRealtimeSync(): void {
+		if (this.realtimeSyncManager) {
+			this.realtimeSyncManager.destroy();
+			this.realtimeSyncManager = null;
+		}
+	}
+
+	/**
+	 * Get the real-time sync manager instance
+	 */
+	getRealtimeSyncManager(): RealtimeSyncManager | null {
+		return this.realtimeSyncManager;
 	}
 
 	// ============================================================================
