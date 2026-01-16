@@ -11,10 +11,11 @@ use worker::*;
 
 mod auth;
 mod durable_objects;
+mod models;
 mod routes;
 mod utils;
 
-use routes::handle_auth_routes;
+use routes::{handle_auth_routes, handle_file_routes};
 use utils::{json_ok, ApiError};
 
 // Re-export Durable Objects for wrangler
@@ -115,9 +116,9 @@ async fn route(req: Request, env: Env) -> Result<Response> {
             handle_auth_routes(req, env, &path).await
         }
 
-        // File routes (to be implemented in Phase 3)
+        // File routes
         (_, p) if p.starts_with("/files") => {
-            ApiError::new("NOT_IMPLEMENTED", "File routes not yet implemented", 501).into_response()
+            handle_file_routes(req, env, &path).await
         }
 
         // Share routes (to be implemented in Phase 8)

@@ -382,7 +382,7 @@ Basic Rust worker with routing, health check, CORS - **Committed**
 ---
 
 ### Phase 2: Authentication - Magic Link ✅ COMPLETED
-Passwordless email authentication via Resend - **Ready to commit**
+Passwordless email authentication via Resend - **Committed**
 
 **Implemented**:
 - `worker/src/auth/jwt.rs` - JWT encoding/decoding with Claims
@@ -401,43 +401,29 @@ Passwordless email authentication via Resend - **Ready to commit**
 
 ---
 
-### Phase 3: R2 File Storage
-**Goal**: File CRUD operations with versioning
+### Phase 3: R2 File Storage ✅ COMPLETED
+File CRUD operations with versioning - **Ready to commit**
+
+**Implemented**:
+- `worker/src/models/file.rs` - FileMeta, FileVersion, response types
+- `worker/src/utils/r2.rs` - R2Helper with versioning support
+- `worker/src/routes/files.rs` - File route handlers with JWT auth
 
 **R2 Bucket Structure**:
 ```
-/{user_id}/
-  files/
-    {path_hash}/
-      content              # Current file content (any type)
-      meta.json            # { path, size, mtime, content_type, hash }
-      versions/
-        {timestamp}        # Historical versions
+/{user_id}/files/{path_hash}/
+  content              # Current file content
+  meta.json            # File metadata
+  versions/{timestamp} # Historical versions
 ```
 
 **Server Routes**:
-- `PUT /files/{path}` - Upload file (creates version)
-- `GET /files/{path}` - Download file
-- `DELETE /files/{path}` - Soft delete
 - `GET /files` - List all files with metadata
+- `GET /files/{path}` - Download file
+- `PUT /files/{path}` - Upload file (creates version if exists)
+- `DELETE /files/{path}` - Soft delete
 - `GET /files/{path}/versions` - List versions
 - `GET /files/{path}/versions/{ts}` - Get specific version
-
-**File Metadata Model**:
-```rust
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileMeta {
-    pub path: String,
-    pub size: u64,
-    pub mtime: i64,
-    pub content_type: String,
-    pub content_hash: String,
-    pub deleted: bool,
-}
-```
-
-**Commit**: `feat(worker): R2 file storage with versioning`
 
 ---
 
