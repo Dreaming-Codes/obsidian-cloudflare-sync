@@ -1,8 +1,152 @@
-/*
+/* Cloudflare Sync Plugin Styles */
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+/* ============================================================================
+   Settings Tab
+   ============================================================================ */
 
-If your plugin does not need CSS, delete this file.
+.cloudflare-sync-status {
+	margin-bottom: 1em;
+	padding: 0.75em 1em;
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+}
 
-*/
+.cloudflare-sync-status .status-indicator {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+}
+
+.cloudflare-sync-status .status-connected {
+	color: var(--text-success);
+}
+
+.cloudflare-sync-status .status-connecting {
+	color: var(--text-warning);
+}
+
+.cloudflare-sync-status .status-disconnected {
+	color: var(--text-muted);
+}
+
+.cloudflare-sync-status .status-error {
+	color: var(--text-error);
+}
+
+/* ============================================================================
+   Status Bar
+   ============================================================================ */
+
+.cloudflare-sync-statusbar {
+	display: flex;
+	align-items: center;
+	gap: 0.25em;
+	cursor: pointer;
+	padding: 0 0.5em;
+	border-radius: var(--radius-s);
+	transition: background-color 150ms ease;
+}
+
+.cloudflare-sync-statusbar:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.cloudflare-sync-statusbar-icon {
+	font-size: 0.9em;
+}
+
+.cloudflare-sync-statusbar-text {
+	font-size: var(--font-ui-smaller);
+}
+
+.cloudflare-sync-statusbar.status-connected .cloudflare-sync-statusbar-text {
+	color: var(--text-success);
+}
+
+.cloudflare-sync-statusbar.status-syncing .cloudflare-sync-statusbar-text {
+	color: var(--text-accent);
+}
+
+.cloudflare-sync-statusbar.status-error .cloudflare-sync-statusbar-text {
+	color: var(--text-error);
+}
+
+.cloudflare-sync-statusbar.status-connecting .cloudflare-sync-statusbar-text {
+	color: var(--text-warning);
+}
+
+/* Syncing animation */
+.cloudflare-sync-statusbar.status-syncing .cloudflare-sync-statusbar-icon {
+	animation: cloudflare-sync-spin 1s linear infinite;
+}
+
+@keyframes cloudflare-sync-spin {
+	from {
+		transform: rotate(0deg);
+	}
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* ============================================================================
+   Magic Link Modal
+   ============================================================================ */
+
+.cloudflare-sync-modal {
+	padding: 1em;
+}
+
+.cloudflare-sync-modal h2 {
+	margin-top: 0;
+	margin-bottom: 0.5em;
+}
+
+.cloudflare-sync-modal p {
+	margin-bottom: 1em;
+}
+
+.cloudflare-sync-loading {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 2em;
+	color: var(--text-muted);
+}
+
+.cloudflare-sync-timer {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 1em;
+	font-size: var(--font-ui-large);
+	font-family: var(--font-monospace);
+	color: var(--text-accent);
+}
+
+.cloudflare-sync-error {
+	color: var(--text-error);
+	padding: 1em;
+	background-color: var(--background-modifier-error);
+	border-radius: var(--radius-s);
+}
+
+/* ============================================================================
+   Notifications
+   ============================================================================ */
+
+.cloudflare-sync-notice.notice-success {
+	border-left: 3px solid var(--text-success);
+}
+
+.cloudflare-sync-notice.notice-warning {
+	border-left: 3px solid var(--text-warning);
+}
+
+.cloudflare-sync-notice.notice-error {
+	border-left: 3px solid var(--text-error);
+}
+
+.cloudflare-sync-notice.notice-info {
+	border-left: 3px solid var(--text-accent);
+}

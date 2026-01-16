@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-sample-plugin",
-	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"name": "obsidian-cloudflare-sync",
+	"version": "0.1.0",
+	"description": "Real-time collaborative sync for Obsidian using Cloudflare infrastructure",
 	"keywords": [],
 	"license": "0-BSD",
 	"type": "module",

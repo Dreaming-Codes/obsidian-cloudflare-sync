@@ -1,101 +1,255 @@
-import { App, Editor, MarkdownView, MarkdownFileInfo, Modal, Notice, Plugin } from 'obsidian';
-import { DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab } from './settings';
+import { Plugin } from 'obsidian';
+import { AuthManager } from './auth/AuthManager';
+import { MagicLinkModal } from './auth/MagicLinkModal';
+import { CloudflareSyncSettingTab, CloudflareSyncSettings, DEFAULT_SETTINGS } from './settings';
+import type { ConnectionStatus, SyncStatus } from './types';
+import { NotificationManager } from './ui/NotificationManager';
+import { StatusBar } from './ui/StatusBar';
 
-// Remember to rename these classes and interfaces!
+/**
+ * Cloudflare Sync Plugin for Obsidian
+ *
+ * Provides real-time collaborative sync using Cloudflare infrastructure:
+ * - R2 for file storage
+ * - Durable Objects for real-time sync
+ * - Workers for API and authentication
+ */
+export default class CloudflareSyncPlugin extends Plugin {
+	settings!: CloudflareSyncSettings;
+	authManager!: AuthManager;
+	notificationManager!: NotificationManager;
+	private statusBar!: StatusBar;
 
-export default class MyPlugin extends Plugin {
-	settings!: MyPluginSettings;
+	// Connection and sync state
+	private connectionStatus: ConnectionStatus = 'disconnected';
+	private syncStatus: SyncStatus = 'idle';
 
-	async onload() {
+	async onload(): Promise<void> {
+		// Load settings
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
+		// Initialize managers
+		this.authManager = new AuthManager(this);
+		this.notificationManager = new NotificationManager(this);
+		this.statusBar = new StatusBar(this);
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
+		// Initialize auth (check token validity, schedule refresh)
+		await this.authManager.initialize();
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			},
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, _ctx: MarkdownView | MarkdownFileInfo) => {
-				editor.replaceSelection('Sample editor command');
-			},
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+		// Initialize status bar
+		this.statusBar.initialize();
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
-			},
-		});
+		// Add settings tab
+		this.addSettingTab(new CloudflareSyncSettingTab(this.app, this));
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		// Register commands
+		this.registerCommands();
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice('Click');
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		// Start sync if enabled and authenticated
+		if (this.settings.syncEnabled && this.authManager.isAuthenticated()) {
+			// Defer sync start to allow Obsidian to fully load
+			this.app.workspace.onLayoutReady(() => {
+				this.startSync();
+			});
+		}
 	}
 
-	onunload() {}
+	onunload(): void {
+		// Clean up managers
+		this.authManager?.cleanup();
+		this.statusBar?.cleanup();
 
-	async loadSettings() {
-		this.settings = Object.assign(
-			{},
-			DEFAULT_SETTINGS,
-			(await this.loadData()) as Partial<MyPluginSettings>,
-		);
+		// Stop any active sync
+		this.stopSync();
 	}
 
-	async saveSettings() {
+	// ============================================================================
+	// Settings
+	// ============================================================================
+
+	async loadSettings(): Promise<void> {
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<CloudflareSyncSettings>);
+	}
+
+	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
+		// Update status bar when settings change
+		this.statusBar?.update();
 	}
 
-	onOpen() {
-		let { contentEl } = this;
-		contentEl.setText('Woah!');
+	// ============================================================================
+	// Status Accessors
+	// ============================================================================
+
+	getConnectionStatus(): ConnectionStatus {
+		return this.connectionStatus;
 	}
 
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
+	getSyncStatus(): SyncStatus {
+		return this.syncStatus;
+	}
+
+	setConnectionStatus(status: ConnectionStatus): void {
+		this.connectionStatus = status;
+		this.statusBar?.update();
+	}
+
+	setSyncStatus(status: SyncStatus): void {
+		this.syncStatus = status;
+		this.statusBar?.update();
+	}
+
+	// ============================================================================
+	// Authentication UI
+	// ============================================================================
+
+	openMagicLinkModal(): void {
+		new MagicLinkModal(this).open();
+	}
+
+	// ============================================================================
+	// Sync Operations
+	// ============================================================================
+
+	/**
+	 * Start the sync process
+	 */
+	async startSync(): Promise<void> {
+		if (!this.authManager.isAuthenticated()) {
+			this.notificationManager.warning('Please log in to start syncing');
+			return;
+		}
+
+		if (!this.settings.syncEnabled) {
+			return;
+		}
+
+		this.setConnectionStatus('connecting');
+
+		try {
+			// TODO: Initialize WebSocket connection
+			// TODO: Initialize file watcher
+			// TODO: Perform initial sync
+
+			this.setConnectionStatus('connected');
+			this.setSyncStatus('idle');
+			this.notificationManager.success('Sync started');
+		} catch (error) {
+			console.error('Failed to start sync:', error);
+			this.setConnectionStatus('error');
+			this.notificationManager.error('Failed to start sync');
+		}
+	}
+
+	/**
+	 * Stop the sync process
+	 */
+	async stopSync(): Promise<void> {
+		// TODO: Close WebSocket connection
+		// TODO: Stop file watcher
+		// TODO: Flush pending changes
+
+		this.setConnectionStatus('disconnected');
+		this.setSyncStatus('idle');
+	}
+
+	/**
+	 * Trigger a manual full sync
+	 */
+	async triggerManualSync(): Promise<void> {
+		if (!this.authManager.isAuthenticated()) {
+			this.notificationManager.warning('Please log in to sync');
+			return;
+		}
+
+		this.setSyncStatus('syncing');
+		this.statusBar?.showSyncing();
+
+		try {
+			// TODO: Perform full sync
+			// - List all remote files
+			// - Compare with local files
+			// - Upload/download as needed
+
+			this.setSyncStatus('idle');
+			this.notificationManager.success('Sync completed');
+		} catch (error) {
+			console.error('Manual sync failed:', error);
+			this.setSyncStatus('error');
+			this.notificationManager.error('Sync failed');
+		}
+	}
+
+	// ============================================================================
+	// Commands
+	// ============================================================================
+
+	private registerCommands(): void {
+		// Login command
+		this.addCommand({
+			id: 'login',
+			name: 'Login with email',
+			callback: () => {
+				if (this.authManager.isAuthenticated()) {
+					this.notificationManager.info(`Already logged in as ${this.settings.userEmail}`);
+				} else {
+					this.openMagicLinkModal();
+				}
+			},
+		});
+
+		// Logout command
+		this.addCommand({
+			id: 'logout',
+			name: 'Logout',
+			checkCallback: (checking) => {
+				if (!this.authManager.isAuthenticated()) {
+					return false;
+				}
+				if (!checking) {
+					this.authManager.logout();
+				}
+				return true;
+			},
+		});
+
+		// Manual sync command
+		this.addCommand({
+			id: 'sync-now',
+			name: 'Sync now',
+			checkCallback: (checking) => {
+				if (!this.authManager.isAuthenticated() || !this.settings.syncEnabled) {
+					return false;
+				}
+				if (!checking) {
+					this.triggerManualSync();
+				}
+				return true;
+			},
+		});
+
+		// Toggle sync command
+		this.addCommand({
+			id: 'toggle-sync',
+			name: 'Toggle sync',
+			checkCallback: (checking) => {
+				if (!this.authManager.isAuthenticated()) {
+					return false;
+				}
+				if (!checking) {
+					this.settings.syncEnabled = !this.settings.syncEnabled;
+					this.saveSettings();
+
+					if (this.settings.syncEnabled) {
+						this.startSync();
+						this.notificationManager.info('Sync enabled');
+					} else {
+						this.stopSync();
+						this.notificationManager.info('Sync disabled');
+					}
+				}
+				return true;
+			},
+		});
 	}
 }

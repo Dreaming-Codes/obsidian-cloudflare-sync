@@ -402,7 +402,7 @@ Passwordless email authentication via Resend - **Committed**
 ---
 
 ### Phase 3: R2 File Storage ✅ COMPLETED
-File CRUD operations with versioning - **Ready to commit**
+File CRUD operations with versioning - **Committed**
 
 **Implemented**:
 - `worker/src/models/file.rs` - FileMeta, FileVersion, response types
@@ -427,44 +427,26 @@ File CRUD operations with versioning - **Ready to commit**
 
 ---
 
-### Phase 4: Plugin Foundation
-**Goal**: Obsidian plugin with settings and auth UI
+### Phase 4: Plugin Foundation ✅ COMPLETED
+Obsidian plugin with settings and auth UI - **Committed**
 
-**Tasks**:
-1. Update `manifest.json`:
-   - `id`: `cloudflare-sync`
-   - `name`: `Cloudflare Sync`
-   - `description`: Real-time collaborative sync using Cloudflare
-2. Create settings interface:
-   ```typescript
-   interface CloudflareSyncSettings {
-     serverUrl: string;        // default: https://sync.elysiumcraftrp.org
-     userEmail: string;        // read-only after auth
-     syncEnabled: boolean;
-     authToken: string | null; // JWT
-     tokenExpiry: number | null;
-   }
-   ```
-3. Create `SettingsTab` with:
-   - Server URL input
-   - Login/Logout button
-   - Sync enabled toggle
-   - Connection status display
-4. Create `MagicLinkModal`:
-   - Email input
-   - Send link button
-   - Waiting state with timer
-   - Success/error handling
-5. Create `AuthManager`:
-   - Store/retrieve JWT
-   - Auto-refresh before expiry
-   - Logout functionality
-6. Create `StatusBar` component
+**Implemented**:
+- `manifest.json` - Updated with cloudflare-sync plugin info
+- `src/types.ts` - Shared TypeScript types for API, auth, files
+- `src/settings.ts` - CloudflareSyncSettings interface and SettingsTab
+- `src/auth/AuthManager.ts` - JWT storage, refresh, magic link auth
+- `src/auth/MagicLinkModal.ts` - Email login UI with state management
+- `src/ui/StatusBar.ts` - Sync status display in status bar
+- `src/ui/NotificationManager.ts` - Toast notification system
+- `src/main.ts` - Plugin lifecycle, commands, manager initialization
+- `styles.css` - Plugin styling for all UI components
 
-**Commits**:
-- `feat(plugin): settings interface and tab`
-- `feat(plugin): magic link authentication modal`
-- `feat(plugin): auth manager with token refresh`
+**Plugin Features**:
+- Settings tab with server URL, auth, sync toggle
+- Magic link authentication flow
+- Status bar with connection/sync status
+- Commands: login, logout, sync-now, toggle-sync
+- Auto token refresh before expiry
 
 ---
 
