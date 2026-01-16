@@ -3,6 +3,7 @@ import type CloudflareSyncPlugin from '../main';
 import type { FileMeta, SyncStatus } from '../types';
 import { FileSync } from './FileSync';
 import { FileChange, FileWatcher } from './FileWatcher';
+import { OfflineQueue, PendingOperation } from './OfflineQueue';
 
 interface SyncState {
 	/** Map of file path to remote metadata */
@@ -24,9 +25,11 @@ export class SyncManager {
 	private plugin: CloudflareSyncPlugin;
 	private fileWatcher: FileWatcher;
 	private fileSync: FileSync;
+	private offlineQueue: OfflineQueue;
 	private state: SyncState;
 	private isSyncing: boolean = false;
 	private syncInterval: ReturnType<typeof setInterval> | null = null;
+	private isProcessingQueue: boolean = false;
 
 	/** Auto-sync interval (5 minutes) */
 	private static readonly AUTO_SYNC_INTERVAL_MS = 5 * 60 * 1000;
@@ -35,6 +38,7 @@ export class SyncManager {
 		this.plugin = plugin;
 		this.fileWatcher = new FileWatcher(plugin);
 		this.fileSync = new FileSync(plugin);
+		this.offlineQueue = new OfflineQueue(plugin);
 		this.state = {
 			remoteFiles: new Map(),
 			localHashes: new Map(),
@@ -48,16 +52,27 @@ export class SyncManager {
 	 * Start the sync manager
 	 */
 	async start(): Promise<void> {
+		// Initialize offline queue
+		await this.offlineQueue.initialize();
+		
+		// Listen for online status changes
+		this.offlineQueue.onStatusChange(this.handleOnlineStatusChange.bind(this));
+
 		// Start watching for file changes
 		this.fileWatcher.start();
 		this.fileWatcher.onFileChange(this.handleFileChange.bind(this));
 
-		// Perform initial sync
-		await this.performFullSync();
+		// Perform initial sync if online
+		if (this.offlineQueue.getIsOnline()) {
+			await this.performFullSync();
+		} else {
+			this.plugin.setSyncStatus('offline');
+			this.plugin.notificationManager.warning('Offline - changes will sync when connected');
+		}
 
 		// Start auto-sync interval
 		this.syncInterval = setInterval(() => {
-			if (this.plugin.settings.syncEnabled && !this.isSyncing) {
+			if (this.plugin.settings.syncEnabled && !this.isSyncing && this.offlineQueue.getIsOnline()) {
 				this.performFullSync();
 			}
 		}, SyncManager.AUTO_SYNC_INTERVAL_MS);
@@ -76,8 +91,113 @@ export class SyncManager {
 		// Stop file watcher
 		this.fileWatcher.stop();
 
-		// Flush pending changes
-		await this.flushPendingChanges();
+		// Cleanup offline queue
+		this.offlineQueue.cleanup();
+
+		// Flush pending changes if online
+		if (this.offlineQueue.getIsOnline()) {
+			await this.flushPendingChanges();
+		}
+	}
+
+	/**
+	 * Handle online status changes
+	 */
+	private async handleOnlineStatusChange(isOnline: boolean): Promise<void> {
+		if (isOnline) {
+			this.plugin.notificationManager.success('Back online - syncing changes');
+			this.plugin.setSyncStatus('syncing');
+
+			// Process any queued operations first
+			await this.processOfflineQueue();
+
+			// Then do a full sync
+			await this.performFullSync();
+		} else {
+			this.plugin.setSyncStatus('offline');
+			this.plugin.notificationManager.warning('Offline - changes will be queued');
+		}
+	}
+
+	/**
+	 * Process queued offline operations
+	 */
+	private async processOfflineQueue(): Promise<void> {
+		if (this.isProcessingQueue) {
+			return;
+		}
+
+		const operations = this.offlineQueue.getPendingOperations();
+		if (operations.length === 0) {
+			return;
+		}
+
+		this.isProcessingQueue = true;
+		console.log(`[SyncManager] Processing ${operations.length} queued operations`);
+
+		for (const op of operations) {
+			try {
+				switch (op.type) {
+					case 'upload': {
+						const file = this.plugin.app.vault.getAbstractFileByPath(op.path);
+						if (file instanceof TFile) {
+							const result = await this.fileSync.uploadFile(file);
+							if (result.success) {
+								this.offlineQueue.removeOperation(op.id);
+							} else {
+								this.offlineQueue.markFailed(op.id, result.error ?? 'Upload failed');
+							}
+						} else {
+							// File no longer exists, remove from queue
+							this.offlineQueue.removeOperation(op.id);
+						}
+						break;
+					}
+					case 'delete': {
+						const result = await this.fileSync.deleteFile(op.path);
+						if (result) {
+							this.offlineQueue.removeOperation(op.id);
+						} else {
+							this.offlineQueue.markFailed(op.id, 'Delete failed');
+						}
+						break;
+					}
+					case 'rename': {
+						// Delete old path first
+						if (op.oldPath) {
+							await this.fileSync.deleteFile(op.oldPath);
+						}
+						// Upload new path
+						const file = this.plugin.app.vault.getAbstractFileByPath(op.path);
+						if (file instanceof TFile) {
+							const result = await this.fileSync.uploadFile(file);
+							if (result.success) {
+								this.offlineQueue.removeOperation(op.id);
+							} else {
+								this.offlineQueue.markFailed(op.id, result.error ?? 'Rename upload failed');
+							}
+						} else {
+							// File no longer exists, remove from queue
+							this.offlineQueue.removeOperation(op.id);
+						}
+						break;
+					}
+				}
+			} catch (e) {
+				const errorMsg = e instanceof Error ? e.message : 'Unknown error';
+				console.error(`[SyncManager] Failed to process queued operation ${op.id}:`, e);
+				this.offlineQueue.markFailed(op.id, errorMsg);
+			}
+		}
+
+		this.isProcessingQueue = false;
+
+		const remaining = this.offlineQueue.getPendingCount();
+		if (remaining > 0) {
+			console.log(`[SyncManager] ${remaining} operations still pending after processing`);
+		} else {
+			console.log('[SyncManager] All queued operations processed');
+		}
 	}
 
 	/**
@@ -195,6 +315,28 @@ export class SyncManager {
 			return;
 		}
 
+		// If offline, queue the operation instead of executing immediately
+		if (!this.offlineQueue.getIsOnline()) {
+			switch (change.type) {
+				case 'create':
+				case 'modify':
+					this.offlineQueue.queueUpload(change.file.path);
+					break;
+				case 'delete':
+					this.offlineQueue.queueDelete(change.file.path);
+					break;
+				case 'rename':
+					if (change.oldPath) {
+						this.offlineQueue.queueRename(change.oldPath, change.file.path);
+					} else {
+						this.offlineQueue.queueUpload(change.file.path);
+					}
+					break;
+			}
+			return;
+		}
+
+		// Online - process normally
 		switch (change.type) {
 			case 'create':
 			case 'modify':
@@ -322,5 +464,12 @@ export class SyncManager {
 	 */
 	getFileSync(): FileSync {
 		return this.fileSync;
+	}
+
+	/**
+	 * Get the offline queue instance
+	 */
+	getOfflineQueue(): OfflineQueue {
+		return this.offlineQueue;
 	}
 }

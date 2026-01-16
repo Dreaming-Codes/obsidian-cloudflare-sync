@@ -9,6 +9,7 @@ export class StatusBar {
 	private statusBarEl: HTMLElement | null = null;
 	private iconEl: HTMLElement | null = null;
 	private textEl: HTMLElement | null = null;
+	private pendingEl: HTMLElement | null = null;
 
 	constructor(plugin: CloudflareSyncPlugin) {
 		this.plugin = plugin;
@@ -27,6 +28,9 @@ export class StatusBar {
 		// Create text element
 		this.textEl = this.statusBarEl.createSpan({ cls: 'cloudflare-sync-statusbar-text' });
 
+		// Create pending count element (hidden by default)
+		this.pendingEl = this.statusBarEl.createSpan({ cls: 'cloudflare-sync-statusbar-pending' });
+
 		// Add click handler to open settings
 		this.statusBarEl.addEventListener('click', () => {
 			// Open plugin settings
@@ -43,13 +47,16 @@ export class StatusBar {
 	 * Update the status bar display
 	 */
 	update(): void {
-		if (!this.statusBarEl || !this.iconEl || !this.textEl) {
+		if (!this.statusBarEl || !this.iconEl || !this.textEl || !this.pendingEl) {
 			return;
 		}
 
 		const connectionStatus = this.plugin.getConnectionStatus();
 		const syncStatus = this.plugin.getSyncStatus();
 		const isAuthenticated = this.plugin.authManager?.isAuthenticated() ?? false;
+
+		// Get pending count from offline queue
+		const pendingCount = this.getPendingCount();
 
 		// Update icon
 		this.iconEl.empty();
@@ -58,6 +65,15 @@ export class StatusBar {
 		// Update text
 		this.textEl.textContent = this.getText(connectionStatus, syncStatus, isAuthenticated);
 
+		// Update pending count badge
+		if (syncStatus === 'offline' && pendingCount > 0) {
+			this.pendingEl.textContent = `(${pendingCount})`;
+			this.pendingEl.removeClass('hidden');
+		} else {
+			this.pendingEl.textContent = '';
+			this.pendingEl.addClass('hidden');
+		}
+
 		// Update classes for styling
 		this.statusBarEl.removeClass(
 			'status-connected',
@@ -65,11 +81,23 @@ export class StatusBar {
 			'status-disconnected',
 			'status-error',
 			'status-syncing',
+			'status-offline',
 		);
 		this.statusBarEl.addClass(this.getStatusClass(connectionStatus, syncStatus, isAuthenticated));
 
 		// Update tooltip
-		this.statusBarEl.setAttribute('aria-label', this.getTooltip(connectionStatus, syncStatus, isAuthenticated));
+		this.statusBarEl.setAttribute('aria-label', this.getTooltip(connectionStatus, syncStatus, isAuthenticated, pendingCount));
+	}
+
+	/**
+	 * Get the number of pending operations from the offline queue
+	 */
+	private getPendingCount(): number {
+		const syncManager = this.plugin.getSyncManager();
+		if (!syncManager) {
+			return 0;
+		}
+		return syncManager.getOfflineQueue().getPendingCount();
 	}
 
 	/**
@@ -149,6 +177,8 @@ export class StatusBar {
 						return 'status-syncing';
 					case 'error':
 						return 'status-error';
+					case 'offline':
+						return 'status-offline';
 					default:
 						return 'status-connected';
 				}
@@ -164,7 +194,7 @@ export class StatusBar {
 	/**
 	 * Get tooltip for current status
 	 */
-	private getTooltip(connection: ConnectionStatus, sync: SyncStatus, isAuthenticated: boolean): string {
+	private getTooltip(connection: ConnectionStatus, sync: SyncStatus, isAuthenticated: boolean, pendingCount: number = 0): string {
 		if (!isAuthenticated) {
 			return 'Cloudflare Sync: Not logged in. Click to configure.';
 		}
@@ -183,7 +213,8 @@ export class StatusBar {
 					case 'error':
 						return `Cloudflare Sync: Sync error. Click for details.`;
 					case 'offline':
-						return `Cloudflare Sync: Offline - changes will sync when reconnected`;
+						const pendingMsg = pendingCount > 0 ? ` (${pendingCount} pending)` : '';
+						return `Cloudflare Sync: Offline${pendingMsg} - changes will sync when reconnected`;
 					default:
 						return `Cloudflare Sync: Connected as ${user}`;
 				}
@@ -211,5 +242,6 @@ export class StatusBar {
 		this.statusBarEl = null;
 		this.iconEl = null;
 		this.textEl = null;
+		this.pendingEl = null;
 	}
 }

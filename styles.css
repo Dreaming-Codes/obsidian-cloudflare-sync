@@ -89,6 +89,26 @@
 	}
 }
 
+/* Offline status */
+.cloudflare-sync-statusbar.status-offline .cloudflare-sync-statusbar-text {
+	color: var(--text-muted);
+}
+
+.cloudflare-sync-statusbar.status-offline .cloudflare-sync-statusbar-icon {
+	opacity: 0.7;
+}
+
+/* Pending count badge */
+.cloudflare-sync-statusbar-pending {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-warning);
+	margin-left: 0.25em;
+}
+
+.cloudflare-sync-statusbar-pending.hidden {
+	display: none;
+}
+
 /* ============================================================================
    Magic Link Modal
    ============================================================================ */
