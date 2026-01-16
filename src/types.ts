@@ -33,14 +33,17 @@ export interface MagicLinkResponse {
 }
 
 export interface VerifyResponse {
-	success: boolean;
-	token: string;
+	accessToken: string;
+	refreshToken: string;
+	expiresAt: number;
 	user: UserInfo;
 }
 
 export interface RefreshResponse {
-	success: boolean;
-	token: string;
+	accessToken: string;
+	refreshToken: string;
+	expiresAt: number;
+	user: UserInfo;
 }
 
 export interface UserInfo {

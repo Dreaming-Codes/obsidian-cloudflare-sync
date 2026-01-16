@@ -69,6 +69,24 @@ pub struct User {
     pub created_at: i64,
 }
 
+/// SQL row for user query (uses snake_case from database).
+#[derive(Debug, Deserialize)]
+struct UserRow {
+    id: String,
+    email: String,
+    created_at: i64,
+}
+
+impl From<UserRow> for User {
+    fn from(row: UserRow) -> Self {
+        Self {
+            id: row.id,
+            email: row.email,
+            created_at: row.created_at,
+        }
+    }
+}
+
 /// Session data model.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -306,10 +324,10 @@ impl UserDurableObject {
             vec![email.clone().into()],
         )?;
 
-        let existing_user: Option<User> = user_cursor.next::<User>().next().transpose()?;
+        let existing_user: Option<UserRow> = user_cursor.next::<UserRow>().next().transpose()?;
 
-        let user = match existing_user {
-            Some(u) => u,
+        let user: User = match existing_user {
+            Some(u) => u.into(),
             None => {
                 // Create new user
                 let user_id = uuid::Uuid::new_v4().to_string();
@@ -404,10 +422,10 @@ impl UserDurableObject {
             vec![user_id.into()],
         )?;
 
-        let user: Option<User> = user_cursor.next::<User>().next().transpose()?;
+        let user: Option<UserRow> = user_cursor.next::<UserRow>().next().transpose()?;
 
-        let user = match user {
-            Some(u) => u,
+        let user: User = match user {
+            Some(u) => u.into(),
             None => {
                 return ApiError::internal("User not found").into_response();
             }
@@ -463,10 +481,10 @@ impl UserDurableObject {
             vec![claims.sub.into()],
         )?;
 
-        let user: Option<User> = cursor.next::<User>().next().transpose()?;
+        let user: Option<UserRow> = cursor.next::<UserRow>().next().transpose()?;
 
         match user {
-            Some(u) => json_ok(&u),
+            Some(u) => json_ok(&User::from(u)),
             None => ApiError::not_found("User not found").into_response(),
         }
     }

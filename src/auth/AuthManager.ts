@@ -164,8 +164,14 @@ export class AuthManager {
 
 			const data = response.json as VerifyResponse;
 
-			if (data.success && data.token && data.user) {
-				await this.handleSuccessfulAuth(data.token, data.user.email, data.user.id);
+			if (data.accessToken && data.user) {
+				await this.handleSuccessfulAuth(
+					data.accessToken,
+					data.refreshToken,
+					data.user.email,
+					data.user.id,
+					data.expiresAt
+				);
 				new Notice(`Logged in as ${data.user.email}`);
 				return true;
 			}
@@ -183,8 +189,8 @@ export class AuthManager {
 	 * Refresh the current JWT token
 	 */
 	async refreshToken(): Promise<boolean> {
-		const currentToken = this.plugin.settings.authToken;
-		if (!currentToken) {
+		const refreshToken = this.plugin.settings.refreshToken;
+		if (!refreshToken) {
 			return false;
 		}
 
@@ -194,21 +200,19 @@ export class AuthManager {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
-					Authorization: `Bearer ${currentToken}`,
 				},
+				body: JSON.stringify({ refresh_token: refreshToken }),
 			});
 
 			const data = response.json as RefreshResponse;
 
-			if (data.success && data.token) {
-				const payload = this.decodeToken(data.token);
-				if (payload) {
-					this.plugin.settings.authToken = data.token;
-					this.plugin.settings.tokenExpiry = payload.exp;
-					await this.plugin.saveSettings();
-					this.scheduleTokenRefresh();
-					return true;
-				}
+			if (data.accessToken) {
+				this.plugin.settings.authToken = data.accessToken;
+				this.plugin.settings.refreshToken = data.refreshToken;
+				this.plugin.settings.tokenExpiry = data.expiresAt;
+				await this.plugin.saveSettings();
+				this.scheduleTokenRefresh();
+				return true;
 			}
 
 			return false;
@@ -223,18 +227,19 @@ export class AuthManager {
 	 * Logout from the current session
 	 */
 	async logout(): Promise<void> {
-		const token = this.plugin.settings.authToken;
+		const refreshToken = this.plugin.settings.refreshToken;
 
 		// Clear local auth state first
 		await this.clearAuthState();
 
 		// Try to invalidate on server (best effort)
-		if (token) {
+		if (refreshToken) {
 			try {
 				await requestUrl({
 					url: `${this.plugin.settings.serverUrl}/auth/logout`,
 					method: 'POST',
-					headers: { Authorization: `Bearer ${token}` },
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ refresh_token: refreshToken }),
 				});
 			} catch {
 				// Ignore server errors during logout
@@ -273,13 +278,20 @@ export class AuthManager {
 	/**
 	 * Handle successful authentication
 	 */
-	private async handleSuccessfulAuth(token: string, email: string, userId: string): Promise<void> {
-		const payload = this.decodeToken(token);
+	private async handleSuccessfulAuth(
+		accessToken: string,
+		refreshToken: string,
+		email: string,
+		userId: string,
+		expiresAt?: number
+	): Promise<void> {
+		const payload = this.decodeToken(accessToken);
 
-		this.plugin.settings.authToken = token;
+		this.plugin.settings.authToken = accessToken;
+		this.plugin.settings.refreshToken = refreshToken;
 		this.plugin.settings.userEmail = email;
 		this.plugin.settings.userId = userId;
-		this.plugin.settings.tokenExpiry = payload?.exp ?? null;
+		this.plugin.settings.tokenExpiry = expiresAt ?? payload?.exp ?? null;
 
 		await this.plugin.saveSettings();
 		this.scheduleTokenRefresh();
