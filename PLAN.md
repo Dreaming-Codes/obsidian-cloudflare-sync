@@ -110,6 +110,7 @@ cloudflare-sync/
 │       │   ├── auth.rs            # /auth/*
 │       │   ├── files.rs           # /files/*
 │       │   ├── share.rs           # /share/*
+│       │   ├── comments.rs        # /docs/{doc_id}/comments/*
 │       │   └── websocket.rs       # /ws/*
 │       ├── models/
 │       │   ├── mod.rs
@@ -588,33 +589,41 @@ pub enum ServerMessage {
 
 ---
 
-### Phase 9: Comments System
-**Goal**: Inline comments synced via CRDT
+### Phase 9: Comments System ✅ COMPLETED
 
-**Comment Features**:
-- Create comment at cursor position
-- Edit/delete own comments
+**Implemented (Worker)**:
+- `worker/src/routes/comments.rs` - Comment route handler forwarding to DocumentDO
+- Updated `worker/src/lib.rs` - Added `/docs/{doc_id}/comments/*` routes
+- DocumentDO already had comment handlers from Phase 6
+
+**Implemented (Plugin)**:
+- `src/types.ts` - Comment types (Comment, CreateCommentRequest, UpdateCommentRequest, etc.)
+- `src/comments/CommentManager.ts` - API client for comment CRUD operations
+- `src/comments/CommentView.ts` - CommentsModal and QuickCommentModal UI
+- `src/auth/AuthManager.ts` - Added `getUserId()` and `getUserEmail()` methods
+- `src/main.ts` - Integrated CommentManager, added command and file menu
+- `styles.css` - Comment modal and thread styling
+
+**Server Routes**:
+- `GET /docs/{doc_id}/comments` - List all comments on a document
+- `POST /docs/{doc_id}/comments` - Create new comment
+- `PUT /docs/{doc_id}/comments/{id}` - Update comment (content/resolved)
+- `DELETE /docs/{doc_id}/comments/{id}` - Delete comment and replies
+
+**Plugin Features**:
+- CommentsModal for viewing all comments on a file
+- Threaded comments with replies
 - Resolve/unresolve comments
-- Threaded replies
-- Highlight commented text
+- Delete own comments
+- File menu "Comments..." option
+- Command: "View comments on current file"
+- Relative timestamp formatting (e.g., "5m ago")
 
-**Markdown Fallback** (for viewers without plugin):
-```markdown
-Text with comment.[^comment-abc123]
-
-[^comment-abc123]: **user@example.com** (2026-01-15):
-  This needs more detail.
-```
-
-**Plugin Tasks**:
-1. Create `CommentManager`
-2. Create comment popover UI
-3. Highlight text with comments
-4. Sync comments via Y.js
-
-**Commits**:
-- `feat(worker): comment storage in DocumentDO`
-- `feat(plugin): comment system with inline UI`
+**Future Enhancements** (Phase 10 or later):
+- Real-time comment updates via WebSocket
+- Editor integration for inline comment markers
+- Position-aware comments using yrs RelativePosition
+- Comment notifications
 
 ---
 
@@ -662,6 +671,10 @@ Text with comment.[^comment-abc123]
 | PUT | `/share/{id}` | Update share | Yes |
 | DELETE | `/share/{id}` | Revoke share | Yes |
 | POST | `/share/{id}/accept` | Accept invite | Yes |
+| GET | `/docs/{doc_id}/comments` | List comments | Yes |
+| POST | `/docs/{doc_id}/comments` | Create comment | Yes |
+| PUT | `/docs/{doc_id}/comments/{id}` | Update comment | Yes |
+| DELETE | `/docs/{doc_id}/comments/{id}` | Delete comment | Yes |
 | WS | `/ws` | WebSocket endpoint | Yes |
 
 ---

@@ -301,3 +301,227 @@
 	color: var(--text-muted);
 	padding: 2em;
 }
+
+/* ============================================================================
+   Comments Modal
+   ============================================================================ */
+
+.cloudflare-sync-comments-modal {
+	padding: 1em;
+	max-width: 600px;
+}
+
+.cloudflare-sync-comments-modal h2 {
+	margin-top: 0;
+	margin-bottom: 1em;
+}
+
+.cloudflare-sync-comments-modal h3 {
+	margin-top: 1.5em;
+	margin-bottom: 0.5em;
+	font-size: var(--font-ui-medium);
+	color: var(--text-muted);
+}
+
+.comments-content {
+	max-height: 500px;
+	overflow-y: auto;
+}
+
+.comments-add-section {
+	padding-bottom: 1em;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.comments-textarea {
+	width: 100%;
+	min-height: 60px;
+	resize: vertical;
+}
+
+.comments-filter-section {
+	padding: 0.75em 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.comments-count {
+	font-weight: var(--font-medium);
+}
+
+.comments-count-detail {
+	margin-left: 0.5em;
+}
+
+.comments-list-section {
+	margin-top: 1em;
+}
+
+.comments-empty,
+.comments-loading {
+	text-align: center;
+	color: var(--text-muted);
+	padding: 2em;
+}
+
+/* Comment Item */
+.comment-item {
+	padding: 0.75em;
+	margin-bottom: 0.75em;
+	background-color: var(--background-secondary);
+	border-radius: var(--radius-s);
+	border-left: 3px solid var(--interactive-accent);
+}
+
+.comment-item.resolved {
+	opacity: 0.7;
+	border-left-color: var(--text-muted);
+}
+
+.comment-item.depth-1 {
+	margin-left: 1.5em;
+	border-left-color: var(--text-muted);
+}
+
+.comment-item.depth-2 {
+	margin-left: 3em;
+	border-left-color: var(--text-faint);
+}
+
+.comment-header {
+	display: flex;
+	align-items: center;
+	gap: 0.75em;
+	margin-bottom: 0.5em;
+}
+
+.comment-author {
+	font-weight: var(--font-medium);
+	color: var(--text-normal);
+}
+
+.comment-time {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.comment-resolved-badge {
+	font-size: var(--font-ui-smaller);
+	padding: 0.1em 0.4em;
+	background-color: var(--background-modifier-success);
+	color: var(--text-success);
+	border-radius: var(--radius-s);
+}
+
+.comment-content {
+	margin-bottom: 0.5em;
+}
+
+.comment-content p {
+	margin: 0;
+	white-space: pre-wrap;
+}
+
+.comment-actions {
+	display: flex;
+	gap: 0.5em;
+	margin-top: 0.5em;
+}
+
+.comment-action-btn {
+	padding: 0.2em 0.5em;
+	font-size: var(--font-ui-smaller);
+	background: transparent;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	color: var(--text-muted);
+}
+
+.comment-action-btn:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.comment-action-btn.danger {
+	color: var(--text-error);
+	border-color: var(--text-error);
+}
+
+.comment-action-btn.danger:hover {
+	background-color: var(--text-error);
+	color: var(--text-on-accent);
+}
+
+.comment-action-btn.mod-cta {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: var(--interactive-accent);
+}
+
+.comment-action-btn.mod-cta:hover {
+	background-color: var(--interactive-accent-hover);
+}
+
+/* Comment Replies */
+.comment-replies {
+	margin-top: 0.75em;
+}
+
+.comment-reply-form {
+	margin-top: 0.75em;
+	padding: 0.75em;
+	background-color: var(--background-primary);
+	border-radius: var(--radius-s);
+}
+
+.comment-reply-textarea {
+	width: 100%;
+	min-height: 50px;
+	margin-bottom: 0.5em;
+	padding: 0.5em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background-color: var(--background-primary);
+	resize: vertical;
+}
+
+.comment-reply-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 0.5em;
+}
+
+/* Quick Comment Modal */
+.cloudflare-sync-quick-comment {
+	padding: 1em;
+	max-width: 400px;
+}
+
+.cloudflare-sync-quick-comment h3 {
+	margin-top: 0;
+	margin-bottom: 0.75em;
+}
+
+.quick-comment-quote {
+	margin-bottom: 1em;
+	padding: 0.5em 0.75em;
+	background-color: var(--background-secondary);
+	border-left: 3px solid var(--interactive-accent);
+	border-radius: var(--radius-s);
+}
+
+.quick-comment-quote blockquote {
+	margin: 0;
+	font-style: italic;
+	color: var(--text-muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 100%;
+}
+
+.quick-comment-textarea {
+	width: 100%;
+	min-height: 60px;
+}

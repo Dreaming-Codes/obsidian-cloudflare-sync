@@ -1,6 +1,8 @@
 import { MarkdownView, Plugin, TFile, TFolder, Menu } from 'obsidian';
 import { AuthManager } from './auth/AuthManager';
 import { MagicLinkModal } from './auth/MagicLinkModal';
+import { CommentManager } from './comments/CommentManager';
+import { CommentsModal } from './comments/CommentView';
 import { CloudflareSyncSettingTab, CloudflareSyncSettings, DEFAULT_SETTINGS } from './settings';
 import { ShareManager } from './sharing/ShareManager';
 import { PendingSharesModal, ShareModal } from './sharing/ShareModal';
@@ -23,6 +25,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 	authManager!: AuthManager;
 	notificationManager!: NotificationManager;
 	shareManager!: ShareManager;
+	commentManager!: CommentManager;
 	private statusBar!: StatusBar;
 	private syncManager: SyncManager | null = null;
 	private realtimeSyncManager: RealtimeSyncManager | null = null;
@@ -39,6 +42,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 		this.authManager = new AuthManager(this);
 		this.notificationManager = new NotificationManager(this);
 		this.shareManager = new ShareManager(this);
+		this.commentManager = new CommentManager(this);
 		this.statusBar = new StatusBar(this);
 
 		// Initialize auth (check token validity, schedule refresh)
@@ -392,6 +396,25 @@ export default class CloudflareSyncPlugin extends Plugin {
 				return true;
 			},
 		});
+
+		// View comments on current file command
+		this.addCommand({
+			id: 'view-comments',
+			name: 'View comments on current file',
+			checkCallback: (checking) => {
+				if (!this.authManager.isAuthenticated()) {
+					return false;
+				}
+				const file = this.app.workspace.getActiveFile();
+				if (!file) {
+					return false;
+				}
+				if (!checking) {
+					new CommentsModal(this, file).open();
+				}
+				return true;
+			},
+		});
 	}
 
 	/**
@@ -413,6 +436,18 @@ export default class CloudflareSyncPlugin extends Plugin {
 							new ShareModal(this, file).open();
 						});
 				});
+
+				// Add "Comments" to file context menu (only for files, not folders)
+				if (file instanceof TFile) {
+					menu.addItem((item) => {
+						item
+							.setTitle('Comments...')
+							.setIcon('message-square')
+							.onClick(() => {
+								new CommentsModal(this, file).open();
+							});
+					});
+				}
 			})
 		);
 	}

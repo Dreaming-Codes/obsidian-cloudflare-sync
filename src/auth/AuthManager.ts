@@ -84,6 +84,20 @@ export class AuthManager {
 	}
 
 	/**
+	 * Get the current user's ID
+	 */
+	getUserId(): string | null {
+		return this.plugin.settings.userId ?? null;
+	}
+
+	/**
+	 * Get the current user's email
+	 */
+	getUserEmail(): string | null {
+		return this.plugin.settings.userEmail ?? null;
+	}
+
+	/**
 	 * Get a valid JWT token, refreshing if necessary.
 	 * Returns null if not authenticated or refresh fails.
 	 */

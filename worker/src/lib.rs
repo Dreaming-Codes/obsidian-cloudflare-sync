@@ -16,7 +16,7 @@ mod routes;
 mod sync;
 mod utils;
 
-use routes::{handle_auth_routes, handle_file_routes, handle_share_routes, handle_websocket_upgrade};
+use routes::{handle_auth_routes, handle_comment_routes, handle_file_routes, handle_share_routes, handle_websocket_upgrade};
 use utils::{json_ok, ApiError};
 
 // Re-export Durable Objects for wrangler
@@ -107,6 +107,7 @@ async fn route(req: Request, env: Env) -> Result<Response> {
                     "auth": "/auth/*",
                     "files": "/files/*",
                     "share": "/share/*",
+                    "docs": "/docs/{doc_id}/comments/*",
                     "ws": "/ws"
                 }
             });
@@ -121,6 +122,11 @@ async fn route(req: Request, env: Env) -> Result<Response> {
         // File routes
         (_, p) if p.starts_with("/files") => {
             handle_file_routes(req, env, &path).await
+        }
+
+        // Document comment routes
+        (_, p) if p.starts_with("/docs/") && p.contains("/comments") => {
+            handle_comment_routes(req, &env).await
         }
 
         // Share routes

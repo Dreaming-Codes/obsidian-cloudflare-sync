@@ -189,3 +189,40 @@ export type ServerMessage =
 	| { type: 'pong'; timestamp: number }
 	| { type: 'user_joined'; doc_id: string; user_id: string; email: string }
 	| { type: 'user_left'; doc_id: string; user_id: string };
+
+// ============================================================================
+// Comments
+// ============================================================================
+
+export interface Comment {
+	id: string;
+	authorId: string;
+	authorEmail: string;
+	content: string;
+	position: string; // Base64 encoded yrs RelativePosition
+	createdAt: number;
+	updatedAt: number | null;
+	resolved: boolean;
+	parentId: string | null;
+}
+
+export interface CreateCommentRequest {
+	content: string;
+	position: string; // Base64 encoded yrs RelativePosition
+	parentId?: string;
+}
+
+export interface UpdateCommentRequest {
+	content?: string;
+	resolved?: boolean;
+}
+
+export interface CommentResponse {
+	success: boolean;
+	comment?: Comment;
+	message?: string;
+}
+
+export interface ListCommentsResponse {
+	comments: Comment[];
+}
