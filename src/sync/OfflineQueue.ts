@@ -38,14 +38,6 @@ export interface OfflineQueueData {
 }
 
 /**
- * Default queue data
- */
-const DEFAULT_QUEUE_DATA: OfflineQueueData = {
-	operations: [],
-	lastOnline: null,
-};
-
-/**
  * Manages offline operation queuing and network status detection
  */
 export class OfflineQueue {
@@ -55,6 +47,10 @@ export class OfflineQueue {
 	private lastOnline: number | null = null;
 	private onlineCheckInterval: ReturnType<typeof setInterval> | null = null;
 	private statusChangeCallbacks: Array<(isOnline: boolean) => void> = [];
+
+	/** Bound event handlers for cleanup */
+	private boundHandleOnline: () => void;
+	private boundHandleOffline: () => void;
 
 	/** Interval for checking online status (30 seconds) */
 	private static readonly ONLINE_CHECK_INTERVAL_MS = 30 * 1000;
@@ -67,6 +63,8 @@ export class OfflineQueue {
 
 	constructor(plugin: CloudflareSyncPlugin) {
 		this.plugin = plugin;
+		this.boundHandleOnline = this.handleOnline.bind(this);
+		this.boundHandleOffline = this.handleOffline.bind(this);
 	}
 
 	/**
@@ -83,8 +81,8 @@ export class OfflineQueue {
 		}
 
 		// Listen to browser online/offline events
-		window.addEventListener('online', this.handleOnline.bind(this));
-		window.addEventListener('offline', this.handleOffline.bind(this));
+		window.addEventListener('online', this.boundHandleOnline);
+		window.addEventListener('offline', this.boundHandleOffline);
 
 		// Start periodic online check (as a backup)
 		this.startOnlineCheck();
@@ -96,8 +94,8 @@ export class OfflineQueue {
 	 * Cleanup resources
 	 */
 	cleanup(): void {
-		window.removeEventListener('online', this.handleOnline.bind(this));
-		window.removeEventListener('offline', this.handleOffline.bind(this));
+		window.removeEventListener('online', this.boundHandleOnline);
+		window.removeEventListener('offline', this.boundHandleOffline);
 
 		if (this.onlineCheckInterval) {
 			clearInterval(this.onlineCheckInterval);

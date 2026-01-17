@@ -3,7 +3,7 @@ import type CloudflareSyncPlugin from '../main';
 import type { FileMeta, SyncProgress, SyncStatus } from '../types';
 import { FileSync } from './FileSync';
 import { FileChange, FileWatcher } from './FileWatcher';
-import { OfflineQueue, PendingOperation } from './OfflineQueue';
+import { OfflineQueue } from './OfflineQueue';
 import { WebSocketClient } from './WebSocketClient';
 
 interface SyncState {
@@ -178,7 +178,7 @@ export class SyncManager {
 		path: string,
 		action: 'upload' | 'delete',
 		originDevice: string,
-		contentHash?: string
+		_contentHash?: string
 	): Promise<void> {
 		// Ignore notifications from our own device
 		const myDeviceId = this.plugin.settings.deviceId;

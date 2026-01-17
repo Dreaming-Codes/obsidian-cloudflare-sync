@@ -1,4 +1,4 @@
-import { Plugin, TFile } from 'obsidian';
+import { Plugin } from 'obsidian';
 import { AuthManager } from './auth/AuthManager';
 import { MagicLinkModal } from './auth/MagicLinkModal';
 import { CloudflareSyncSettingTab, CloudflareSyncSettings, DEFAULT_SETTINGS } from './settings';

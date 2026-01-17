@@ -1,4 +1,4 @@
-import { debounce, TAbstractFile, TFile, TFolder } from 'obsidian';
+import { debounce, TAbstractFile, TFile } from 'obsidian';
 import type CloudflareSyncPlugin from '../main';
 
 export type FileChangeType = 'create' | 'modify' | 'delete' | 'rename';
