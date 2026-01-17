@@ -52,20 +52,35 @@ export class SyncManager {
 	 * Start the sync manager
 	 */
 	async start(): Promise<void> {
+		console.log('[SyncManager] start() called');
+		
 		// Initialize offline queue
+		console.log('[SyncManager] Initializing offline queue...');
+		let t = Date.now();
 		await this.offlineQueue.initialize();
+		console.log(`[SyncManager] Offline queue initialized in ${Date.now() - t}ms`);
 		
 		// Listen for online status changes
 		this.offlineQueue.onStatusChange(this.handleOnlineStatusChange.bind(this));
 
 		// Start watching for file changes
+		console.log('[SyncManager] Starting file watcher...');
+		t = Date.now();
 		this.fileWatcher.start();
 		this.fileWatcher.onFileChange(this.handleFileChange.bind(this));
+		console.log(`[SyncManager] File watcher started in ${Date.now() - t}ms`);
 
 		// Perform initial sync if online
 		if (this.offlineQueue.getIsOnline()) {
-			await this.performFullSync();
+			console.log('[SyncManager] Online - starting full sync in background...');
+			// Don't await - let it run in background
+			this.performFullSync().then(() => {
+				console.log('[SyncManager] Background full sync completed');
+			}).catch((err) => {
+				console.error('[SyncManager] Background full sync failed:', err);
+			});
 		} else {
+			console.log('[SyncManager] Offline - skipping initial sync');
 			this.plugin.setSyncStatus('offline');
 			this.plugin.notificationManager.warning('Offline - changes will sync when connected');
 		}
@@ -76,6 +91,8 @@ export class SyncManager {
 				this.performFullSync();
 			}
 		}, SyncManager.AUTO_SYNC_INTERVAL_MS);
+		
+		console.log('[SyncManager] start() returning (sync runs in background)');
 	}
 
 	/**
@@ -205,48 +222,135 @@ export class SyncManager {
 	 */
 	async performFullSync(): Promise<void> {
 		if (this.isSyncing) {
+			console.log('[SyncManager] performFullSync() skipped - already syncing');
 			return;
 		}
 
+		console.log('[SyncManager] performFullSync() starting...');
+		const syncStart = Date.now();
 		this.isSyncing = true;
 		this.plugin.setSyncStatus('syncing');
 
 		try {
 			// 1. Get remote file list
+			console.log('[SyncManager] Fetching remote file list...');
+			let t = Date.now();
 			const remoteFiles = await this.fileSync.listFiles();
+			console.log(`[SyncManager] Got ${remoteFiles.length} remote files in ${Date.now() - t}ms`);
+			
 			this.state.remoteFiles.clear();
 			for (const file of remoteFiles) {
 				this.state.remoteFiles.set(file.path, file);
 			}
 
 			// 2. Get local files
+			console.log('[SyncManager] Getting local files...');
+			t = Date.now();
 			const localFiles = this.fileWatcher.getAllSyncableFiles();
+			console.log(`[SyncManager] Got ${localFiles.length} local files in ${Date.now() - t}ms`);
 
 			// 3. Calculate differences
+			console.log('[SyncManager] Calculating diff...');
+			t = Date.now();
 			const { toUpload, toDownload, toDelete } = await this.calculateDiff(localFiles, remoteFiles);
+			console.log(`[SyncManager] Diff calculated in ${Date.now() - t}ms: ${toUpload.length} to upload, ${toDownload.length} to download, ${toDelete.length} to delete`);
 
 			// 4. Process uploads
-			for (const file of toUpload) {
-				await this.uploadFile(file);
+			if (toUpload.length > 0) {
+				console.log(`[SyncManager] Uploading ${toUpload.length} files...`);
+				t = Date.now();
+				for (const file of toUpload) {
+					await this.uploadFile(file);
+				}
+				console.log(`[SyncManager] Uploads completed in ${Date.now() - t}ms`);
 			}
 
 			// 5. Process downloads
-			for (const path of toDownload) {
-				await this.downloadFile(path);
+			if (toDownload.length > 0) {
+				console.log(`[SyncManager] Downloading ${toDownload.length} files...`);
+				t = Date.now();
+				for (const path of toDownload) {
+					await this.downloadFile(path);
+				}
+				console.log(`[SyncManager] Downloads completed in ${Date.now() - t}ms`);
 			}
 
 			// 6. Process deletes (remote files that should be deleted)
 			for (const path of toDelete) {
 				// For now, we don't auto-delete - just log
-				console.log(`Remote file ${path} was deleted locally`);
+				console.log(`[SyncManager] Remote file ${path} was deleted locally`);
 			}
 
 			this.state.lastSync = Date.now();
 			this.plugin.setSyncStatus('idle');
+			console.log(`[SyncManager] performFullSync() completed in ${Date.now() - syncStart}ms`);
 		} catch (error) {
-			console.error('Full sync failed:', error);
+			console.error('[SyncManager] Full sync failed:', error);
 			this.plugin.setSyncStatus('error');
 			this.plugin.notificationManager.error('Sync failed');
+		} finally {
+			this.isSyncing = false;
+		}
+	}
+
+	/**
+	 * Force re-upload all local files to remote.
+	 * Clears remote metadata first, then uploads all local files.
+	 */
+	async forceReuploadAll(): Promise<void> {
+		if (this.isSyncing) {
+			this.plugin.notificationManager.warning('Sync already in progress');
+			return;
+		}
+
+		console.log('[SyncManager] forceReuploadAll() starting...');
+		const startTime = Date.now();
+		this.isSyncing = true;
+		this.plugin.setSyncStatus('syncing');
+
+		try {
+			// 1. Clear remote file metadata
+			console.log('[SyncManager] Clearing remote file metadata...');
+			const cleared = await this.fileSync.clearRemoteFiles();
+			if (!cleared) {
+				throw new Error('Failed to clear remote file metadata');
+			}
+			console.log('[SyncManager] Remote metadata cleared');
+
+			// 2. Get all local files
+			const localFiles = this.fileWatcher.getAllSyncableFiles();
+			console.log(`[SyncManager] Uploading ${localFiles.length} local files...`);
+
+			// 3. Upload all local files
+			let uploaded = 0;
+			let failed = 0;
+			for (const file of localFiles) {
+				const result = await this.fileSync.uploadFile(file);
+				if (result.success) {
+					uploaded++;
+				} else {
+					failed++;
+					console.error(`[SyncManager] Failed to upload ${file.path}: ${result.error}`);
+				}
+
+				// Progress notification every 50 files
+				if ((uploaded + failed) % 50 === 0) {
+					console.log(`[SyncManager] Progress: ${uploaded + failed}/${localFiles.length} files`);
+				}
+			}
+
+			// 4. Update state
+			this.state.remoteFiles.clear();
+			this.state.lastSync = Date.now();
+			this.plugin.setSyncStatus('idle');
+
+			const duration = Date.now() - startTime;
+			console.log(`[SyncManager] forceReuploadAll() completed in ${duration}ms: ${uploaded} uploaded, ${failed} failed`);
+			this.plugin.notificationManager.success(`Re-uploaded ${uploaded} files${failed > 0 ? ` (${failed} failed)` : ''}`);
+		} catch (error) {
+			console.error('[SyncManager] Force re-upload failed:', error);
+			this.plugin.setSyncStatus('error');
+			this.plugin.notificationManager.error('Force re-upload failed');
 		} finally {
 			this.isSyncing = false;
 		}
@@ -279,8 +383,9 @@ export class SyncManager {
 				toUpload.push(localFile);
 			} else if (!remoteMeta.deleted) {
 				// File exists in both - check if local is newer
+				// Use mtime (milliseconds) for comparison
 				const localMtime = localFile.stat.mtime;
-				const remoteMtime = remoteMeta.updatedAt;
+				const remoteMtime = remoteMeta.mtime;
 
 				if (localMtime > remoteMtime) {
 					// Local is newer - upload

@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import type CloudflareSyncPlugin from './main';
+import { PendingSharesModal, SharedWithMeModal } from './sharing/ShareModal';
 import type { ConnectionStatus, SyncStatus } from './types';
 
 // ============================================================================
@@ -66,6 +67,12 @@ export class CloudflareSyncSettingTab extends PluginSettingTab {
 		// Sync Settings Section
 		containerEl.createEl('h3', { text: 'Sync' });
 		this.renderSyncSettings(containerEl);
+
+		// Sharing Section (only when logged in)
+		if (this.plugin.settings.authToken) {
+			containerEl.createEl('h3', { text: 'Sharing' });
+			this.renderSharingSettings(containerEl);
+		}
 	}
 
 	private renderConnectionStatus(containerEl: HTMLElement): void {
@@ -213,6 +220,52 @@ export class CloudflareSyncSettingTab extends PluginSettingTab {
 						await this.plugin.triggerManualSync();
 					}),
 			);
+
+			new Setting(containerEl)
+				.setName('Force re-upload all')
+				.setDesc('Clear remote data and re-upload all local files. Use this to fix sync issues.')
+				.addButton((button) =>
+					button
+						.setButtonText('Re-upload all')
+						.setWarning()
+						.setDisabled(!this.plugin.settings.syncEnabled)
+						.onClick(async () => {
+							// Confirm before proceeding
+							const confirmed = confirm(
+								'This will clear all remote file metadata and re-upload all local files. ' +
+								'This operation may take a while for large vaults.\n\n' +
+								'Are you sure you want to continue?'
+							);
+							if (confirmed) {
+								await this.plugin.triggerForceReupload();
+							}
+						}),
+				);
 		}
+	}
+
+	private renderSharingSettings(containerEl: HTMLElement): void {
+		new Setting(containerEl)
+			.setName('Shared with me')
+			.setDesc('View and download files others have shared with you')
+			.addButton((button) =>
+				button
+					.setButtonText('View shared files')
+					.setCta()
+					.onClick(() => {
+						new SharedWithMeModal(this.plugin).open();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Pending invitations')
+			.setDesc('View pending share invitations')
+			.addButton((button) =>
+				button
+					.setButtonText('View invitations')
+					.onClick(() => {
+						new PendingSharesModal(this.plugin).open();
+					}),
+			);
 	}
 }

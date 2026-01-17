@@ -108,4 +108,76 @@ impl ResendClient {
         serde_json::from_str(&response_text)
             .map_err(|e| Error::RustError(format!("Failed to parse Resend response: {}", e)))
     }
+
+    /// Send a share invitation email.
+    pub async fn send_share_invitation(
+        &self,
+        invitee_email: &str,
+        owner_email: &str,
+        resource_path: &str,
+        permission: &str,
+    ) -> Result<ResendEmailResponse> {
+        let permission_text = match permission {
+            "editor" => "edit",
+            "commenter" => "comment on",
+            "viewer" => "view",
+            _ => "access",
+        };
+
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto;">
+    <h1 style="color: #333;">You've been invited to collaborate</h1>
+    <p style="color: #666; font-size: 16px; line-height: 1.5;">
+        <strong>{}</strong> has shared a file with you and invited you to <strong>{}</strong> it.
+    </p>
+    <div style="background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 20px 0;">
+        <p style="margin: 0; color: #333; font-size: 14px;">
+            <strong>File:</strong> {}
+        </p>
+    </div>
+    <p style="color: #666; font-size: 16px; line-height: 1.5;">
+        Open Obsidian and go to <strong>Settings → Cloudflare Sync → View pending share invitations</strong> to accept this invitation.
+    </p>
+    <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+    <p style="color: #999; font-size: 12px;">
+        If you don't have an account yet, you'll need to sign up first using the same email address ({}).
+    </p>
+</body>
+</html>"#,
+            owner_email, permission_text, resource_path, invitee_email
+        );
+
+        let request_body = ResendEmailRequest {
+            from: &self.from_email,
+            to: vec![invitee_email],
+            subject: &format!("{} shared a file with you", owner_email),
+            html,
+        };
+
+        let body = serde_json::to_string(&request_body)
+            .map_err(|e| Error::RustError(format!("Failed to serialize request: {}", e)))?;
+
+        let headers = Headers::new();
+        headers.set("Authorization", &format!("Bearer {}", self.api_key))?;
+        headers.set("Content-Type", "application/json")?;
+
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(body.into()));
+
+        let request = Request::new_with_init("https://api.resend.com/emails", &init)?;
+        let mut response = Fetch::Request(request).send().await?;
+
+        let response_text = response.text().await?;
+
+        serde_json::from_str(&response_text)
+            .map_err(|e| Error::RustError(format!("Failed to parse Resend response: {}", e)))
+    }
 }

@@ -9,5 +9,5 @@ pub mod websocket;
 pub use auth::handle_auth_routes;
 pub use comments::handle_comment_routes;
 pub use files::handle_file_routes;
-pub use share::handle_share_routes;
+pub use share::{handle_share_routes, handle_shared_file_download};
 pub use websocket::handle_websocket_upgrade;

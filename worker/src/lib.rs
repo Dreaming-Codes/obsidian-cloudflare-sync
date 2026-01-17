@@ -134,6 +134,11 @@ async fn route(req: Request, env: Env) -> Result<Response> {
             handle_share_routes(req, &env).await
         }
 
+        // Shared files download (for accessing files shared by others)
+        (Method::Get, p) if p.starts_with("/shared-files/") => {
+            routes::handle_shared_file_download(req, &env, &path).await
+        }
+
         // WebSocket endpoint for real-time sync
         (Method::Get, "/ws") => {
             handle_websocket_upgrade(req, env).await

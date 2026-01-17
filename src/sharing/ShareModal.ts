@@ -320,3 +320,223 @@ export class PendingSharesModal extends Modal {
 		contentEl.empty();
 	}
 }
+
+/**
+ * SharedWithMeModal - Shows files/folders shared with the current user.
+ */
+export class SharedWithMeModal extends Modal {
+	private plugin: CloudflareSyncPlugin;
+	private shareManager: ShareManager;
+	private shares: ShareInvite[] = [];
+	private isLoading = false;
+
+	constructor(plugin: CloudflareSyncPlugin) {
+		super(plugin.app);
+		this.plugin = plugin;
+		this.shareManager = new ShareManager(plugin);
+	}
+
+	async onOpen(): Promise<void> {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.addClass('cloudflare-sync-shared-modal');
+
+		contentEl.createEl('h2', { text: 'Shared with me' });
+
+		this.isLoading = true;
+		this.renderContent();
+
+		// Get all shares (both pending and accepted)
+		this.shares = await this.shareManager.getSharedWithMe();
+		this.isLoading = false;
+		this.renderContent();
+	}
+
+	private renderContent(): void {
+		const { contentEl } = this;
+		const container = contentEl.querySelector('.shared-content') as HTMLElement | null;
+		if (container) {
+			container.empty();
+		}
+
+		const content = container || contentEl.createDiv({ cls: 'shared-content' });
+		content.empty();
+
+		if (this.isLoading) {
+			content.createEl('p', { text: 'Loading...', cls: 'shared-loading' });
+			return;
+		}
+
+		if (this.shares.length === 0) {
+			content.createEl('p', { text: 'No files have been shared with you yet.', cls: 'shared-empty' });
+			return;
+		}
+
+		// Separate pending and accepted shares
+		const pending = this.shares.filter(s => !s.acceptedAt);
+		const accepted = this.shares.filter(s => s.acceptedAt);
+
+		if (pending.length > 0) {
+			content.createEl('h3', { text: 'Pending invitations' });
+			for (const share of pending) {
+				this.renderPendingItem(content, share);
+			}
+		}
+
+		if (accepted.length > 0) {
+			content.createEl('h3', { text: 'Shared files' });
+			for (const share of accepted) {
+				this.renderAcceptedItem(content, share);
+			}
+		}
+	}
+
+	private renderPendingItem(container: HTMLElement, share: ShareInvite): void {
+		const item = container.createDiv({ cls: 'shared-item pending' });
+
+		const info = item.createDiv({ cls: 'shared-item-info' });
+		info.createEl('div', {
+			text: share.resourcePath,
+			cls: 'shared-path',
+		});
+		info.createEl('div', {
+			text: `From: ${share.ownerEmail} · ${this.shareManager.getPermissionLabel(share.permission)}`,
+			cls: 'shared-meta',
+		});
+
+		const controls = item.createDiv({ cls: 'shared-item-controls' });
+		const acceptBtn = controls.createEl('button', {
+			text: 'Accept',
+			cls: 'mod-cta',
+		});
+		acceptBtn.addEventListener('click', async () => {
+			acceptBtn.disabled = true;
+			acceptBtn.textContent = 'Accepting...';
+
+			const success = await this.shareManager.acceptShare(share.id);
+			if (success) {
+				new Notice('Share accepted!');
+				// Refresh the list
+				this.shares = await this.shareManager.getSharedWithMe();
+				this.renderContent();
+			} else {
+				new Notice('Failed to accept share');
+				acceptBtn.disabled = false;
+				acceptBtn.textContent = 'Accept';
+			}
+		});
+	}
+
+	private renderAcceptedItem(container: HTMLElement, share: ShareInvite): void {
+		const item = container.createDiv({ cls: 'shared-item accepted' });
+
+		const info = item.createDiv({ cls: 'shared-item-info' });
+		info.createEl('div', {
+			text: share.resourcePath,
+			cls: 'shared-path',
+		});
+		info.createEl('div', {
+			text: `From: ${share.ownerEmail} · ${this.shareManager.getPermissionLabel(share.permission)}`,
+			cls: 'shared-meta',
+		});
+
+		const controls = item.createDiv({ cls: 'shared-item-controls' });
+		
+		// Download button
+		const downloadBtn = controls.createEl('button', {
+			text: 'Download',
+			cls: 'mod-cta',
+		});
+		downloadBtn.addEventListener('click', async () => {
+			downloadBtn.disabled = true;
+			downloadBtn.textContent = 'Downloading...';
+
+			try {
+				const success = await this.downloadSharedFile(share);
+				if (success) {
+					new Notice(`Downloaded: ${share.resourcePath}`);
+				} else {
+					new Notice('Failed to download file');
+				}
+			} catch (e) {
+				console.error('Download error:', e);
+				new Notice('Failed to download file');
+			}
+
+			downloadBtn.disabled = false;
+			downloadBtn.textContent = 'Download';
+		});
+	}
+
+	private async downloadSharedFile(share: ShareInvite): Promise<boolean> {
+		try {
+			// Fetch the shared file from the server
+			const response = await fetch(
+				`${this.plugin.settings.serverUrl}/shared-files/${share.ownerId}/${encodeURIComponent(share.resourcePath)}`,
+				{
+					headers: this.plugin.authManager.getAuthHeader(),
+				}
+			);
+
+			if (!response.ok) {
+				console.error('Failed to download shared file:', response.status);
+				return false;
+			}
+
+			const content = await response.arrayBuffer();
+
+			// Determine where to save - use "Shared" folder
+			const sharedFolder = 'Shared';
+			const targetPath = `${sharedFolder}/${share.ownerEmail}/${share.resourcePath}`;
+
+			// Ensure folders exist
+			await this.ensureFolderExists(sharedFolder);
+			await this.ensureFolderExists(`${sharedFolder}/${share.ownerEmail}`);
+
+			// Get parent folder of the file if needed
+			const pathParts = targetPath.split('/');
+			pathParts.pop(); // Remove filename
+			if (pathParts.length > 0) {
+				await this.ensureFolderExists(pathParts.join('/'));
+			}
+
+			// Check if file already exists
+			const existingFile = this.plugin.app.vault.getAbstractFileByPath(targetPath);
+			if (existingFile instanceof TFile) {
+				await this.plugin.app.vault.modifyBinary(existingFile, content);
+			} else {
+				await this.plugin.app.vault.createBinary(targetPath, content);
+			}
+
+			return true;
+		} catch (e) {
+			console.error('Error downloading shared file:', e);
+			return false;
+		}
+	}
+
+	private async ensureFolderExists(path: string): Promise<void> {
+		const existing = this.plugin.app.vault.getAbstractFileByPath(path);
+		if (!existing) {
+			try {
+				await this.plugin.app.vault.createFolder(path);
+			} catch {
+				// Folder might already exist or parent needs to be created
+				const parts = path.split('/');
+				let currentPath = '';
+				for (const part of parts) {
+					currentPath = currentPath ? `${currentPath}/${part}` : part;
+					const folder = this.plugin.app.vault.getAbstractFileByPath(currentPath);
+					if (!folder) {
+						await this.plugin.app.vault.createFolder(currentPath);
+					}
+				}
+			}
+		}
+	}
+
+	onClose(): void {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+}

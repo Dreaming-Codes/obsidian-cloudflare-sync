@@ -104,9 +104,17 @@ impl<'a> R2Helper<'a> {
 
         match obj {
             Some(o) => {
-                let body = o.body().ok_or_else(|| Error::RustError("No body in content object".into()))?;
-                let bytes = body.bytes().await?;
-                Ok(Some(bytes.to_vec()))
+                // Handle empty files - body() may return None for 0-byte objects
+                match o.body() {
+                    Some(body) => {
+                        let bytes = body.bytes().await?;
+                        Ok(Some(bytes.to_vec()))
+                    }
+                    None => {
+                        // Empty file - return empty vec
+                        Ok(Some(Vec::new()))
+                    }
+                }
             }
             None => Ok(None),
         }
@@ -286,9 +294,17 @@ impl<'a> R2Helper<'a> {
 
         match obj {
             Some(o) => {
-                let body = o.body().ok_or_else(|| Error::RustError("No body in version object".into()))?;
-                let bytes = body.bytes().await?;
-                Ok(Some(bytes.to_vec()))
+                // Handle empty files - body() may return None for 0-byte objects
+                match o.body() {
+                    Some(body) => {
+                        let bytes = body.bytes().await?;
+                        Ok(Some(bytes.to_vec()))
+                    }
+                    None => {
+                        // Empty file version - return empty vec
+                        Ok(Some(Vec::new()))
+                    }
+                }
             }
             None => Ok(None),
         }

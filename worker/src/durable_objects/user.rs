@@ -283,6 +283,7 @@ impl DurableObject for UserDurableObject {
             (Method::Get, "/files") => self.handle_list_files(req).await,
             (Method::Put, "/files") => self.handle_upsert_file(req).await,
             (Method::Delete, "/files") => self.handle_delete_file(req).await,
+            (Method::Post, "/files/clear") => self.handle_clear_files(req).await,
             _ => ApiError::not_found("Endpoint not found").into_response(),
         }
     }
@@ -1172,6 +1173,25 @@ impl UserDurableObject {
         json_ok(&serde_json::json!({
             "success": true,
             "path": body.path
+        }))
+    }
+
+    /// Handle clearing all file metadata for a user (for re-sync).
+    async fn handle_clear_files(&self, req: Request) -> Result<Response> {
+        let claims = match self.extract_claims(&req) {
+            Ok(c) => c,
+            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
+        };
+
+        // Delete all files for this user
+        self.state.storage().sql().exec(
+            "DELETE FROM files WHERE user_id = ?1",
+            vec![claims.sub.into()],
+        )?;
+
+        json_ok(&serde_json::json!({
+            "success": true,
+            "message": "All file metadata cleared"
         }))
     }
 }

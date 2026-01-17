@@ -57,8 +57,13 @@ export class FileSync {
 			});
 
 			const data = response.json as FileListResponse;
-			if (data.success) {
-				return data.files;
+			// API returns { files: [...], cursor, hasMore } - no success field
+			if (data.files && Array.isArray(data.files)) {
+				// Decode URL-encoded paths from the server
+				return data.files.map(file => ({
+					...file,
+					path: decodeURIComponent(file.path),
+				}));
 			}
 			return [];
 		} catch (error) {
@@ -82,6 +87,7 @@ export class FileSync {
 					...this.getHeaders(),
 					'Content-Type': this.getMimeType(file.extension),
 					'X-Content-Hash': hash,
+					'X-File-Mtime': file.stat.mtime.toString(),
 				},
 				body: content,
 			});
@@ -134,6 +140,25 @@ export class FileSync {
 				path,
 				error: error instanceof Error ? error.message : 'Unknown error',
 			};
+		}
+	}
+
+	/**
+	 * Clear all remote file metadata (for force re-upload)
+	 */
+	async clearRemoteFiles(): Promise<boolean> {
+		try {
+			const response = await requestUrl({
+				url: `${this.baseUrl}/files/clear`,
+				method: 'POST',
+				headers: this.getHeaders(),
+			});
+
+			const data = response.json as { success: boolean };
+			return data.success;
+		} catch (error) {
+			console.error('Failed to clear remote files:', error);
+			return false;
 		}
 	}
 

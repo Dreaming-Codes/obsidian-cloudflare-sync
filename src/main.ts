@@ -131,32 +131,44 @@ export default class CloudflareSyncPlugin extends Plugin {
 	 * Start the sync process
 	 */
 	async startSync(): Promise<void> {
+		console.log('[CloudflareSync] startSync() called');
+		
 		if (!this.authManager.isAuthenticated()) {
+			console.log('[CloudflareSync] Not authenticated, aborting');
 			this.notificationManager.warning('Please log in to start syncing');
 			return;
 		}
 
 		if (!this.settings.syncEnabled) {
+			console.log('[CloudflareSync] Sync disabled, aborting');
 			return;
 		}
 
 		if (this.syncManager) {
+			console.log('[CloudflareSync] SyncManager already running');
 			// Already running
 			return;
 		}
 
+		console.log('[CloudflareSync] Setting status to connecting...');
 		this.setConnectionStatus('connecting');
 
 		try {
+			console.log('[CloudflareSync] Creating SyncManager...');
 			// Initialize and start sync manager
 			this.syncManager = new SyncManager(this);
+			
+			console.log('[CloudflareSync] Calling syncManager.start()...');
+			const startTime = Date.now();
 			await this.syncManager.start();
+			console.log(`[CloudflareSync] syncManager.start() completed in ${Date.now() - startTime}ms`);
 
+			// Set connected immediately - sync happens in background
 			this.setConnectionStatus('connected');
-			this.setSyncStatus('idle');
+			console.log('[CloudflareSync] Status set to connected');
 			this.notificationManager.success('Sync started');
 		} catch (error) {
-			console.error('Failed to start sync:', error);
+			console.error('[CloudflareSync] Failed to start sync:', error);
 			this.syncManager = null;
 			this.setConnectionStatus('error');
 			this.notificationManager.error('Failed to start sync');
@@ -199,6 +211,35 @@ export default class CloudflareSyncPlugin extends Plugin {
 		} catch (error) {
 			console.error('Manual sync failed:', error);
 			this.notificationManager.error('Sync failed');
+		}
+	}
+
+	/**
+	 * Force re-upload all local files to remote.
+	 * This clears remote metadata and uploads everything fresh.
+	 */
+	async triggerForceReupload(): Promise<void> {
+		if (!this.authManager.isAuthenticated()) {
+			this.notificationManager.warning('Please log in to sync');
+			return;
+		}
+
+		if (!this.syncManager) {
+			// Start sync first if not running
+			await this.startSync();
+			if (!this.syncManager) {
+				this.notificationManager.error('Failed to start sync manager');
+				return;
+			}
+		}
+
+		this.statusBar?.showSyncing();
+
+		try {
+			await this.syncManager.forceReuploadAll();
+		} catch (error) {
+			console.error('Force re-upload failed:', error);
+			this.notificationManager.error('Force re-upload failed');
 		}
 	}
 

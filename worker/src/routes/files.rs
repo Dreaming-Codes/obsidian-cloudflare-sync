@@ -1,6 +1,7 @@
 //! File route handlers for R2 storage operations.
 
 use serde::Deserialize;
+use urlencoding::decode;
 use worker::*;
 
 use crate::auth::JwtManager;
@@ -72,6 +73,7 @@ pub async fn handle_file_routes(req: Request, env: Env, path: &str) -> Result<Re
     // Route based on method and path pattern
     match method {
         Method::Get if sub_path.is_empty() => handle_list_files(req, env, auth).await,
+        Method::Post if sub_path == "/clear" => handle_clear_files(req, env).await,
         Method::Get if sub_path.ends_with("/versions") => {
             let file_path = sub_path.strip_suffix("/versions").unwrap_or("");
             handle_list_versions(env, auth, file_path).await
@@ -127,27 +129,49 @@ async fn handle_list_files(req: Request, env: Env, _auth: AuthContext) -> Result
     stub.fetch_with_request(do_req).await
 }
 
+/// POST /files/clear - Clear all file metadata (for re-sync).
+async fn handle_clear_files(req: Request, env: Env) -> Result<Response> {
+    // Forward the Authorization header to the DO
+    let auth_header = req.headers().get("Authorization")?.unwrap_or_default();
+    
+    let headers = Headers::new();
+    headers.set("Authorization", &auth_header)?;
+
+    let stub = get_user_do(&env)?;
+    let do_req = Request::new_with_init(
+        "http://do/files/clear",
+        RequestInit::new()
+            .with_method(Method::Post)
+            .with_headers(headers),
+    )?;
+
+    stub.fetch_with_request(do_req).await
+}
+
 /// GET /files/{path} - Download a file.
 async fn handle_get_file(env: Env, auth: AuthContext, file_path: &str) -> Result<Response> {
     if file_path.is_empty() {
         return ApiError::bad_request("File path is required").into_response();
     }
 
-    // Remove leading slash if present
+    // Remove leading slash if present and decode URL-encoded path
     let clean_path = file_path.strip_prefix('/').unwrap_or(file_path);
+    let decoded_path = decode(clean_path)
+        .map_err(|e| Error::RustError(format!("Failed to decode path: {}", e)))?
+        .into_owned();
 
     let bucket = env.bucket("VAULT_STORAGE")?;
     let r2 = R2Helper::new(&bucket);
 
     // Check metadata first
-    let meta = match r2.get_meta(&auth.user_id, clean_path).await? {
+    let meta = match r2.get_meta(&auth.user_id, &decoded_path).await? {
         Some(m) if !m.deleted => m,
         Some(_) => return ApiError::not_found("File not found").into_response(),
         None => return ApiError::not_found("File not found").into_response(),
     };
 
     // Get content
-    let content = match r2.get_content(&auth.user_id, clean_path).await? {
+    let content = match r2.get_content(&auth.user_id, &decoded_path).await? {
         Some(c) => c,
         None => return ApiError::not_found("File content not found").into_response(),
     };
@@ -169,8 +193,11 @@ async fn handle_put_file(mut req: Request, env: Env, auth: AuthContext, file_pat
         return ApiError::bad_request("File path is required").into_response();
     }
 
-    // Remove leading slash if present
+    // Remove leading slash if present and decode URL-encoded path
     let clean_path = file_path.strip_prefix('/').unwrap_or(file_path);
+    let decoded_path = decode(clean_path)
+        .map_err(|e| Error::RustError(format!("Failed to decode path: {}", e)))?
+        .into_owned();
 
     // Get content type from header or default
     let content_type = req
@@ -191,18 +218,14 @@ async fn handle_put_file(mut req: Request, env: Env, auth: AuthContext, file_pat
         .get("Authorization")?
         .unwrap_or_default();
 
-    // Read body
+    // Read body - empty files are allowed (0-byte files are valid in a vault)
     let content = req.bytes().await?;
-
-    if content.is_empty() {
-        return ApiError::bad_request("File content is required").into_response();
-    }
 
     let bucket = env.bucket("VAULT_STORAGE")?;
     let r2 = R2Helper::new(&bucket);
 
     let (meta, version_created) = r2
-        .put_content(&auth.user_id, clean_path, content.to_vec(), &content_type, mtime)
+        .put_content(&auth.user_id, &decoded_path, content.to_vec(), &content_type, mtime)
         .await?;
 
     // Update metadata in User DO SQLite
@@ -247,8 +270,11 @@ async fn handle_delete_file(req: Request, env: Env, auth: AuthContext, file_path
         return ApiError::bad_request("File path is required").into_response();
     }
 
-    // Remove leading slash if present
+    // Remove leading slash if present and decode URL-encoded path
     let clean_path = file_path.strip_prefix('/').unwrap_or(file_path);
+    let decoded_path = decode(clean_path)
+        .map_err(|e| Error::RustError(format!("Failed to decode path: {}", e)))?
+        .into_owned();
 
     // Get auth header for DO request
     let auth_header = req
@@ -259,7 +285,7 @@ async fn handle_delete_file(req: Request, env: Env, auth: AuthContext, file_path
     let bucket = env.bucket("VAULT_STORAGE")?;
     let r2 = R2Helper::new(&bucket);
 
-    let deleted = r2.soft_delete(&auth.user_id, clean_path).await?;
+    let deleted = r2.soft_delete(&auth.user_id, &decoded_path).await?;
 
     if deleted {
         // Update metadata in User DO SQLite (soft delete)
@@ -269,7 +295,7 @@ async fn handle_delete_file(req: Request, env: Env, auth: AuthContext, file_path
         headers.set("Content-Type", "application/json")?;
 
         let delete_body = serde_json::json!({
-            "path": clean_path,
+            "path": decoded_path,
             "hard_delete": false,
         });
 
@@ -295,16 +321,19 @@ async fn handle_list_versions(env: Env, auth: AuthContext, file_path: &str) -> R
         return ApiError::bad_request("File path is required").into_response();
     }
 
-    // Remove leading slash if present
+    // Remove leading slash if present and decode URL-encoded path
     let clean_path = file_path.strip_prefix('/').unwrap_or(file_path);
+    let decoded_path = decode(clean_path)
+        .map_err(|e| Error::RustError(format!("Failed to decode path: {}", e)))?
+        .into_owned();
 
     let bucket = env.bucket("VAULT_STORAGE")?;
     let r2 = R2Helper::new(&bucket);
 
-    let versions = r2.list_versions(&auth.user_id, clean_path).await?;
+    let versions = r2.list_versions(&auth.user_id, &decoded_path).await?;
 
     json_ok(&crate::models::file::ListVersionsResponse {
-        path: clean_path.to_string(),
+        path: decoded_path,
         versions,
     })
 }
@@ -315,20 +344,23 @@ async fn handle_get_version(env: Env, auth: AuthContext, file_path: &str, timest
         return ApiError::bad_request("File path is required").into_response();
     }
 
-    // Remove leading slash if present
+    // Remove leading slash if present and decode URL-encoded path
     let clean_path = file_path.strip_prefix('/').unwrap_or(file_path);
+    let decoded_path = decode(clean_path)
+        .map_err(|e| Error::RustError(format!("Failed to decode path: {}", e)))?
+        .into_owned();
 
     let bucket = env.bucket("VAULT_STORAGE")?;
     let r2 = R2Helper::new(&bucket);
 
     // Get current metadata for content type
-    let meta = r2.get_meta(&auth.user_id, clean_path).await?;
+    let meta = r2.get_meta(&auth.user_id, &decoded_path).await?;
     let content_type = meta
         .map(|m| m.content_type)
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
     // Get version content
-    let content = match r2.get_version(&auth.user_id, clean_path, timestamp).await? {
+    let content = match r2.get_version(&auth.user_id, &decoded_path, timestamp).await? {
         Some(c) => c,
         None => return ApiError::not_found("Version not found").into_response(),
     };

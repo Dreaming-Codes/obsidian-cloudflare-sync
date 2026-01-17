@@ -75,18 +75,19 @@ export interface ApiSuccess<T> {
 
 export interface FileMeta {
 	path: string;
-	pathHash: string;
 	size: number;
-	mimeType: string;
-	createdAt: number;
-	updatedAt: number;
-	etag: string;
+	mtime: number; // File modification time in milliseconds
+	contentType: string;
+	contentHash: string;
 	deleted: boolean;
+	createdAt: number; // seconds
+	updatedAt: number; // seconds
 }
 
 export interface FileListResponse {
-	success: boolean;
 	files: FileMeta[];
+	cursor: string | null;
+	hasMore: boolean;
 }
 
 export interface FileVersion {
