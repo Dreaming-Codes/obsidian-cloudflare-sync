@@ -5,11 +5,12 @@ import { CommentManager } from './comments/CommentManager';
 import { CommentsModal } from './comments/CommentView';
 import { CloudflareSyncSettingTab, CloudflareSyncSettings, DEFAULT_SETTINGS } from './settings';
 import { ShareManager } from './sharing/ShareManager';
-import { PendingSharesModal, ShareModal } from './sharing/ShareModal';
+import { PendingSharesModal, ShareModal, SharedWithMeModal } from './sharing/ShareModal';
 import { RealtimeSyncManager } from './sync/RealtimeSyncManager';
 import { SyncManager } from './sync/SyncManager';
 import type { ConnectionStatus, SyncStatus } from './types';
 import { NotificationManager } from './ui/NotificationManager';
+import { registerSharedFileView } from './ui/SharedFileView';
 import { StatusBar } from './ui/StatusBar';
 
 /**
@@ -44,6 +45,9 @@ export default class CloudflareSyncPlugin extends Plugin {
 		this.shareManager = new ShareManager(this);
 		this.commentManager = new CommentManager(this);
 		this.statusBar = new StatusBar(this);
+
+		// Register custom views
+		registerSharedFileView(this);
 
 		// Initialize auth (check token validity, schedule refresh)
 		await this.authManager.initialize();
@@ -272,6 +276,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 				app: this.app,
 				serverUrl: this.settings.serverUrl,
 				getToken: () => this.authManager.getValidToken(),
+				getUserId: () => this.authManager.getUserId(),
 				onStatusChange: (status) => {
 					if (status === 'connected') {
 						this.notificationManager.success('Real-time sync connected');
@@ -433,6 +438,21 @@ export default class CloudflareSyncPlugin extends Plugin {
 				}
 				if (!checking) {
 					new PendingSharesModal(this).open();
+				}
+				return true;
+			},
+		});
+
+		// View shared with me command
+		this.addCommand({
+			id: 'view-shared-with-me',
+			name: 'View files shared with me',
+			checkCallback: (checking) => {
+				if (!this.authManager.isAuthenticated()) {
+					return false;
+				}
+				if (!checking) {
+					new SharedWithMeModal(this).open();
 				}
 				return true;
 			},

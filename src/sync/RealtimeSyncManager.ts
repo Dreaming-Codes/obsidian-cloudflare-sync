@@ -12,21 +12,24 @@ export interface RealtimeSyncManagerConfig {
 	app: App;
 	serverUrl: string;
 	getToken: () => Promise<string | null>;
+	getUserId: () => string | null;
 	onStatusChange?: (status: ConnectionStatus) => void;
 	onCollaboratorJoin?: (docId: string, userId: string, email: string) => void;
 	onCollaboratorLeave?: (docId: string, userId: string) => void;
 }
 
 /**
- * Generates a document ID from a file path.
- * Uses a hash to create a consistent, URL-safe ID.
+ * Generates a document ID from an owner ID and file path.
+ * Format: {owner_id}:{path_hash}
+ * This ensures files are globally unique across users.
  */
-async function getDocIdFromPath(path: string): Promise<string> {
+async function getDocId(ownerId: string, path: string): Promise<string> {
 	const encoder = new TextEncoder();
 	const data = encoder.encode(path);
 	const hashBuffer = await crypto.subtle.digest('SHA-256', data);
 	const hashArray = Array.from(new Uint8Array(hashBuffer));
-	return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+	const pathHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+	return `${ownerId}:${pathHash}`;
 }
 
 export class RealtimeSyncManager extends Events {
@@ -128,10 +131,17 @@ export class RealtimeSyncManager extends Events {
 
 	/**
 	 * Subscribe to a file for real-time sync.
+	 * This subscribes to the current user's own file.
 	 */
 	async subscribeToFile(file: TFile): Promise<void> {
 		if (!this.enabled) return;
 		if (!file.path.endsWith('.md')) return; // Only markdown files
+
+		const userId = this.config.getUserId();
+		if (!userId) {
+			console.warn('[RealtimeSyncManager] Cannot subscribe: no user ID');
+			return;
+		}
 
 		// Unsubscribe from previous file
 		if (this.activeDocId) {
@@ -139,7 +149,7 @@ export class RealtimeSyncManager extends Events {
 		}
 
 		this.activeFile = file;
-		this.activeDocId = await getDocIdFromPath(file.path);
+		this.activeDocId = await getDocId(userId, file.path);
 
 		// Get or create CRDT document
 		const crdtDoc = this.crdtManager.getOrCreate(this.activeDocId);
@@ -159,6 +169,43 @@ export class RealtimeSyncManager extends Events {
 		this.wsClient.sendSyncStep1(this.activeDocId, crdtDoc.getStateVector());
 
 		console.log(`[RealtimeSyncManager] Subscribed to ${file.path} (${this.activeDocId})`);
+	}
+
+	/**
+	 * Subscribe to a shared file for real-time collaboration.
+	 * This connects to another user's document.
+	 */
+	async subscribeToSharedFile(ownerId: string, resourcePath: string): Promise<void> {
+		if (!this.enabled) return;
+
+		// Unsubscribe from previous file
+		if (this.activeDocId) {
+			this.wsClient.unsubscribe(this.activeDocId);
+		}
+
+		// Clear active file since this is a remote file
+		this.activeFile = null;
+		this.activeDocId = await getDocId(ownerId, resourcePath);
+
+		// Get or create CRDT document (starts empty, will sync from server)
+		const crdtDoc = this.crdtManager.getOrCreate(this.activeDocId);
+
+		// Subscribe via WebSocket
+		this.wsClient.subscribe(this.activeDocId);
+
+		// Send our state vector to get the full document
+		this.wsClient.sendSyncStep1(this.activeDocId, crdtDoc.getStateVector());
+
+		console.log(`[RealtimeSyncManager] Subscribed to shared file ${resourcePath} from ${ownerId} (${this.activeDocId})`);
+	}
+
+	/**
+	 * Get the current CRDT content for the active document.
+	 */
+	getActiveContent(): string | null {
+		if (!this.activeDocId) return null;
+		const crdtDoc = this.crdtManager.get(this.activeDocId);
+		return crdtDoc?.getContent() ?? null;
 	}
 
 	/**

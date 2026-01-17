@@ -6,6 +6,7 @@ import { Modal, Setting, Notice, TFile, TFolder, TAbstractFile } from 'obsidian'
 import type CloudflareSyncPlugin from '../main';
 import type { Permission, ShareInvite } from '../types';
 import { ShareManager } from './ShareManager';
+import { openSharedFile } from '../ui/SharedFileView';
 
 export class ShareModal extends Modal {
 	private plugin: CloudflareSyncPlugin;
@@ -442,10 +443,31 @@ export class SharedWithMeModal extends Modal {
 
 		const controls = item.createDiv({ cls: 'shared-item-controls' });
 		
-		// Download button
+		// Open button - for real-time collaboration (markdown files only)
+		if (share.resourcePath.endsWith('.md')) {
+			const openBtn = controls.createEl('button', {
+				text: 'Open',
+				cls: 'mod-cta',
+			});
+			openBtn.addEventListener('click', async () => {
+				openBtn.disabled = true;
+				openBtn.textContent = 'Opening...';
+
+				try {
+					await openSharedFile(this.plugin, share);
+					this.close();
+				} catch (e) {
+					console.error('Error opening shared file:', e);
+					new Notice('Failed to open shared file');
+					openBtn.disabled = false;
+					openBtn.textContent = 'Open';
+				}
+			});
+		}
+		
+		// Download button - creates a local copy
 		const downloadBtn = controls.createEl('button', {
 			text: 'Download',
-			cls: 'mod-cta',
 		});
 		downloadBtn.addEventListener('click', async () => {
 			downloadBtn.disabled = true;

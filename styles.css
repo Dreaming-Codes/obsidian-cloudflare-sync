@@ -545,3 +545,218 @@
 	width: 100%;
 	min-height: 60px;
 }
+
+/* ============================================================================
+   Shared With Me Modal
+   ============================================================================ */
+
+.cloudflare-sync-shared-modal {
+	padding: 1em;
+}
+
+.cloudflare-sync-shared-modal h2 {
+	margin-top: 0;
+	margin-bottom: 1em;
+}
+
+.cloudflare-sync-shared-modal h3 {
+	margin-top: 1.5em;
+	margin-bottom: 0.5em;
+	font-size: var(--font-ui-medium);
+	color: var(--text-muted);
+}
+
+.cloudflare-sync-shared-modal h3:first-child {
+	margin-top: 0;
+}
+
+.shared-content {
+	max-height: 400px;
+	overflow-y: auto;
+}
+
+.shared-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0.75em;
+	margin-bottom: 0.5em;
+	background-color: var(--background-secondary);
+	border-radius: var(--radius-s);
+}
+
+.shared-item.pending {
+	border-left: 3px solid var(--text-warning);
+}
+
+.shared-item.accepted {
+	border-left: 3px solid var(--text-success);
+}
+
+.shared-item-info {
+	flex: 1;
+}
+
+.shared-path {
+	font-weight: var(--font-medium);
+	margin-bottom: 0.25em;
+}
+
+.shared-meta {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.shared-item-controls {
+	display: flex;
+	gap: 0.5em;
+	margin-left: 1em;
+}
+
+.shared-loading,
+.shared-empty {
+	text-align: center;
+	color: var(--text-muted);
+	padding: 2em;
+}
+
+/* ============================================================================
+   Shared File View
+   ============================================================================ */
+
+.cloudflare-sync-shared-file-view {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	padding: 1em;
+}
+
+.shared-file-header {
+	margin-bottom: 1em;
+	padding-bottom: 1em;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.shared-file-header h3 {
+	margin: 0 0 0.5em 0;
+	font-size: var(--font-ui-large);
+}
+
+.shared-file-meta {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.shared-file-owner {
+	color: var(--text-normal);
+}
+
+.shared-file-permission {
+	padding: 0.1em 0.4em;
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+}
+
+.shared-file-permission.permission-editor {
+	background-color: var(--background-modifier-success);
+	color: var(--text-success);
+}
+
+.shared-file-permission.permission-viewer {
+	background-color: var(--background-modifier-message);
+	color: var(--text-muted);
+}
+
+.shared-file-permission.permission-commenter {
+	background-color: var(--background-modifier-message);
+	color: var(--text-accent);
+}
+
+.shared-file-status {
+	margin-top: 0.5em;
+}
+
+.shared-file-status .status-text {
+	font-size: var(--font-ui-smaller);
+	padding: 0.2em 0.5em;
+	border-radius: var(--radius-s);
+}
+
+.shared-file-status .status-text.connecting {
+	background-color: var(--background-modifier-message);
+	color: var(--text-warning);
+}
+
+.shared-file-status .status-text.connected {
+	background-color: var(--background-modifier-success);
+	color: var(--text-success);
+}
+
+.shared-file-content {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.shared-file-editor-container {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.shared-file-editor {
+	flex: 1;
+	width: 100%;
+	min-height: 200px;
+	padding: 1em;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-medium);
+	line-height: 1.6;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	resize: none;
+}
+
+.shared-file-editor:focus {
+	outline: none;
+	border-color: var(--interactive-accent);
+}
+
+.shared-file-viewer {
+	flex: 1;
+	overflow: auto;
+	padding: 1em;
+	background-color: var(--background-secondary);
+	border-radius: var(--radius-s);
+}
+
+.shared-file-content-text {
+	margin: 0;
+	white-space: pre-wrap;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-medium);
+	line-height: 1.6;
+}
+
+.shared-file-viewer .loading-text {
+	color: var(--text-muted);
+	font-style: italic;
+}
+
+.shared-file-error {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 2em;
+	text-align: center;
+	color: var(--text-muted);
+}
+
+.shared-file-error p {
+	margin-bottom: 1em;
+}
