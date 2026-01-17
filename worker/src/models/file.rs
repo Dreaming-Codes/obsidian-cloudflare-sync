@@ -79,6 +79,10 @@ pub struct FileUploadResponse {
     pub content_hash: String,
     /// Whether a new version was created (file already existed)
     pub version_created: bool,
+    /// Whether a 3-way merge was performed
+    pub merged: bool,
+    /// Whether the merge had conflicts (conflict markers inserted)
+    pub had_conflict: bool,
 }
 
 /// Response for listing file versions.

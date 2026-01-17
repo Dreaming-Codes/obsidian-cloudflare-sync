@@ -1,4 +1,4 @@
-import { Notice, requestUrl } from 'obsidian';
+import { Notice, Platform, requestUrl } from 'obsidian';
 import type CloudflareSyncPlugin from '../main';
 import type { AuthState, JWTPayload, MagicLinkResponse, RefreshResponse, VerifyResponse } from '../types';
 
@@ -157,9 +157,21 @@ export class AuthManager {
 	 */
 	async verifyToken(token: string): Promise<boolean> {
 		try {
+			// Get platform info
+			const platform = this.getPlatformString();
+			const deviceName = this.getDeviceName();
+
 			const response = await requestUrl({
-				url: `${this.plugin.settings.serverUrl}/auth/verify?token=${encodeURIComponent(token)}`,
-				method: 'GET',
+				url: `${this.plugin.settings.serverUrl}/auth/verify`,
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					token,
+					deviceName,
+					platform,
+					// Include existing device ID if re-authenticating
+					deviceId: this.plugin.settings.deviceId,
+				}),
 			});
 
 			const data = response.json as VerifyResponse;
@@ -170,19 +182,45 @@ export class AuthManager {
 					data.refreshToken,
 					data.user.email,
 					data.user.id,
-					data.expiresAt
+					data.expiresAt,
+					data.device?.id,
+					data.device?.name
 				);
 				new Notice(`Logged in as ${data.user.email}`);
 				return true;
 			}
 
-			new Notice('Invalid or expired magic link');
+			new Notice('Invalid or expired verification code');
 			return false;
 		} catch (error) {
 			console.error('Failed to verify token:', error);
-			new Notice('Failed to verify magic link. Please try again.');
+			new Notice('Failed to verify code. Please try again.');
 			return false;
 		}
+	}
+
+	/**
+	 * Get a human-readable device name
+	 */
+	private getDeviceName(): string {
+		if (Platform.isMacOS) return 'Mac';
+		if (Platform.isWin) return 'Windows PC';
+		if (Platform.isLinux) return 'Linux PC';
+		if (Platform.isIosApp) return 'iPhone/iPad';
+		if (Platform.isAndroidApp) return 'Android Device';
+		return 'Obsidian Device';
+	}
+
+	/**
+	 * Get platform string for device tracking
+	 */
+	private getPlatformString(): string {
+		if (Platform.isMacOS) return 'macos';
+		if (Platform.isWin) return 'windows';
+		if (Platform.isLinux) return 'linux';
+		if (Platform.isIosApp) return 'ios';
+		if (Platform.isAndroidApp) return 'android';
+		return 'unknown';
 	}
 
 	/**
@@ -283,7 +321,9 @@ export class AuthManager {
 		refreshToken: string,
 		email: string,
 		userId: string,
-		expiresAt?: number
+		expiresAt?: number,
+		deviceId?: string,
+		deviceName?: string
 	): Promise<void> {
 		const payload = this.decodeToken(accessToken);
 
@@ -292,6 +332,13 @@ export class AuthManager {
 		this.plugin.settings.userEmail = email;
 		this.plugin.settings.userId = userId;
 		this.plugin.settings.tokenExpiry = expiresAt ?? payload?.exp ?? null;
+
+		if (deviceId) {
+			this.plugin.settings.deviceId = deviceId;
+		}
+		if (deviceName) {
+			this.plugin.settings.deviceName = deviceName;
+		}
 
 		await this.plugin.saveSettings();
 		this.scheduleTokenRefresh();
@@ -311,6 +358,10 @@ export class AuthManager {
 		this.plugin.settings.userId = null;
 		this.plugin.settings.tokenExpiry = null;
 		this.plugin.settings.refreshToken = null;
+		this.plugin.settings.deviceId = null;
+		this.plugin.settings.deviceName = null;
+		// Clear base hashes on logout since they're user-specific
+		this.plugin.settings.fileBaseHashes = {};
 
 		await this.plugin.saveSettings();
 	}

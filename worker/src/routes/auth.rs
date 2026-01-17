@@ -21,7 +21,7 @@ pub async fn handle_auth_routes(req: Request, env: Env, path: &str) -> Result<Re
 
     match (method, sub_path) {
         (Method::Post, "/magic-link") => handle_magic_link(req, env).await,
-        (Method::Get, "/verify") => handle_verify(req, env).await,
+        (Method::Post, "/verify") => handle_verify(req, env).await,
         (Method::Post, "/refresh") => handle_refresh(req, env).await,
         (Method::Post, "/logout") => handle_logout(req, env).await,
         (Method::Get, "/me") => handle_me(req, env).await,
@@ -108,36 +108,22 @@ async fn handle_magic_link(mut req: Request, env: Env) -> Result<Response> {
     }
 }
 
-/// Handle GET /auth/verify?token=xxx - Verify a magic link.
-async fn handle_verify(req: Request, env: Env) -> Result<Response> {
-    let url = req.url()?;
-    let token = url
-        .query_pairs()
-        .find(|(k, _)| k == "token")
-        .map(|(_, v)| v.to_string());
-
-    let token = match token {
-        Some(t) => t,
-        None => return ApiError::bad_request("Missing token parameter").into_response(),
-    };
-
-    // Get device info from User-Agent
-    let device_info = req.headers().get("User-Agent")?.unwrap_or_default();
-
-    // Forward to User DO
+/// Handle POST /auth/verify - Verify a magic link token.
+async fn handle_verify(mut req: Request, env: Env) -> Result<Response> {
+    // Forward body directly to User DO
     let stub = get_user_do(&env)?;
+    
+    let body = req.text().await?;
+    
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/json")?;
     
     let do_req = Request::new_with_init(
         "http://do/verify",
         RequestInit::new()
             .with_method(Method::Post)
-            .with_body(Some(
-                serde_json::to_string(&serde_json::json!({
-                    "token": token,
-                    "device_info": device_info
-                }))?
-                .into(),
-            )),
+            .with_headers(headers)
+            .with_body(Some(body.into())),
     )?;
 
     stub.fetch_with_request(do_req).await

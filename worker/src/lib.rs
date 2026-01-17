@@ -3,8 +3,7 @@
 //! This worker provides:
 //! - Magic link authentication via Resend
 //! - File storage via R2
-//! - Real-time sync via Durable Objects with WebSocket hibernation
-//! - Granular permission management
+//! - User data via Durable Objects
 
 use serde::Serialize;
 use worker::*;
@@ -13,14 +12,13 @@ mod auth;
 mod durable_objects;
 mod models;
 mod routes;
-mod sync;
 mod utils;
 
-use routes::{handle_auth_routes, handle_comment_routes, handle_file_routes, handle_share_routes, handle_websocket_upgrade};
+use routes::{handle_auth_routes, handle_file_routes, handle_ws_routes};
 use utils::{json_ok, ApiError};
 
 // Re-export Durable Objects for wrangler
-pub use durable_objects::DocumentDurableObject;
+pub use durable_objects::SyncNotifyDurableObject;
 pub use durable_objects::UserDurableObject;
 
 /// Health check response.
@@ -105,10 +103,7 @@ async fn route(req: Request, env: Env) -> Result<Response> {
                 "endpoints": {
                     "health": "/health",
                     "auth": "/auth/*",
-                    "files": "/files/*",
-                    "share": "/share/*",
-                    "docs": "/docs/{doc_id}/comments/*",
-                    "ws": "/ws"
+                    "files": "/files/*"
                 }
             });
             json_ok(&response)
@@ -124,25 +119,9 @@ async fn route(req: Request, env: Env) -> Result<Response> {
             handle_file_routes(req, env, &path).await
         }
 
-        // Document comment routes
-        (_, p) if p.starts_with("/docs/") && p.contains("/comments") => {
-            handle_comment_routes(req, &env).await
-        }
-
-        // Shared files download (for accessing files shared by others)
-        // NOTE: Must be before /share routes since /shared-files starts with /share
-        (Method::Get, p) if p.starts_with("/shared-files/") => {
-            routes::handle_shared_file_download(req, &env, &path).await
-        }
-
-        // Share routes
-        (_, p) if p.starts_with("/share") || p == "/shares" || p == "/shared-with-me" || p == "/permissions" => {
-            handle_share_routes(req, &env).await
-        }
-
-        // WebSocket endpoint for real-time sync
+        // WebSocket routes
         (Method::Get, "/ws") => {
-            handle_websocket_upgrade(req, env).await
+            handle_ws_routes(req, env).await
         }
 
         // 404 for everything else

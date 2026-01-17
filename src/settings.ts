@@ -1,6 +1,5 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import type CloudflareSyncPlugin from './main';
-import { PendingSharesModal, SharedWithMeModal } from './sharing/ShareModal';
 import type { ConnectionStatus, SyncStatus } from './types';
 
 // ============================================================================
@@ -22,6 +21,12 @@ export interface CloudflareSyncSettings {
 	tokenExpiry: number | null;
 	/** Refresh token for obtaining new JWTs */
 	refreshToken: string | null;
+	/** Unique device identifier for multi-device sync */
+	deviceId: string | null;
+	/** Device name for display purposes */
+	deviceName: string | null;
+	/** Map of file path to last-synced content hash (base for conflict detection) */
+	fileBaseHashes: Record<string, string>;
 }
 
 export const DEFAULT_SETTINGS: CloudflareSyncSettings = {
@@ -32,6 +37,9 @@ export const DEFAULT_SETTINGS: CloudflareSyncSettings = {
 	authToken: null,
 	tokenExpiry: null,
 	refreshToken: null,
+	deviceId: null,
+	deviceName: null,
+	fileBaseHashes: {},
 };
 
 // ============================================================================
@@ -67,12 +75,6 @@ export class CloudflareSyncSettingTab extends PluginSettingTab {
 		// Sync Settings Section
 		containerEl.createEl('h3', { text: 'Sync' });
 		this.renderSyncSettings(containerEl);
-
-		// Sharing Section (only when logged in)
-		if (this.plugin.settings.authToken) {
-			containerEl.createEl('h3', { text: 'Sharing' });
-			this.renderSharingSettings(containerEl);
-		}
 	}
 
 	private renderConnectionStatus(containerEl: HTMLElement): void {
@@ -242,30 +244,5 @@ export class CloudflareSyncSettingTab extends PluginSettingTab {
 						}),
 				);
 		}
-	}
-
-	private renderSharingSettings(containerEl: HTMLElement): void {
-		new Setting(containerEl)
-			.setName('Shared with me')
-			.setDesc('View and download files others have shared with you')
-			.addButton((button) =>
-				button
-					.setButtonText('View shared files')
-					.setCta()
-					.onClick(() => {
-						new SharedWithMeModal(this.plugin).open();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName('Pending invitations')
-			.setDesc('View pending share invitations')
-			.addButton((button) =>
-				button
-					.setButtonText('View invitations')
-					.onClick(() => {
-						new PendingSharesModal(this.plugin).open();
-					}),
-			);
 	}
 }

@@ -51,8 +51,6 @@ impl ResendClient {
 
     /// Send a magic link email to the given address.
     pub async fn send_magic_link(&self, email: &str, token: &str) -> Result<ResendEmailResponse> {
-        let verify_url = format!("{}/auth/verify?token={}", self.base_url, token);
-
         let html = format!(
             r#"<!DOCTYPE html>
 <html>
@@ -63,100 +61,29 @@ impl ResendClient {
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto;">
     <h1 style="color: #333;">Sign in to Cloudflare Sync</h1>
     <p style="color: #666; font-size: 16px; line-height: 1.5;">
-        Click the button below to sign in to your account. This link will expire in 15 minutes.
+        Copy the verification code below and paste it into the Obsidian plugin to complete your sign in.
     </p>
-    <a href="{}" style="display: inline-block; background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 500; margin: 20px 0;">
-        Sign in
-    </a>
+    <p style="color: #666; font-size: 14px; margin-bottom: 8px;">
+        Your verification code:
+    </p>
+    <div style="background-color: #f5f5f5; border: 1px solid #ddd; border-radius: 6px; padding: 16px; margin: 16px 0;">
+        <code style="font-family: 'SF Mono', Monaco, 'Courier New', monospace; font-size: 14px; color: #333; word-break: break-all; user-select: all;">{}</code>
+    </div>
+    <p style="color: #999; font-size: 14px;">
+        This code will expire in 15 minutes.
+    </p>
     <p style="color: #999; font-size: 14px;">
         If you didn't request this email, you can safely ignore it.
     </p>
-    <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
-    <p style="color: #999; font-size: 12px;">
-        If the button doesn't work, copy and paste this link into your browser:<br>
-        <a href="{}" style="color: #0070f3;">{}</a>
-    </p>
 </body>
 </html>"#,
-            verify_url, verify_url, verify_url
+            token
         );
 
         let request_body = ResendEmailRequest {
             from: &self.from_email,
             to: vec![email],
             subject: "Sign in to Cloudflare Sync",
-            html,
-        };
-
-        let body = serde_json::to_string(&request_body)
-            .map_err(|e| Error::RustError(format!("Failed to serialize request: {}", e)))?;
-
-        let headers = Headers::new();
-        headers.set("Authorization", &format!("Bearer {}", self.api_key))?;
-        headers.set("Content-Type", "application/json")?;
-
-        let mut init = RequestInit::new();
-        init.with_method(Method::Post)
-            .with_headers(headers)
-            .with_body(Some(body.into()));
-
-        let request = Request::new_with_init("https://api.resend.com/emails", &init)?;
-        let mut response = Fetch::Request(request).send().await?;
-
-        let response_text = response.text().await?;
-
-        serde_json::from_str(&response_text)
-            .map_err(|e| Error::RustError(format!("Failed to parse Resend response: {}", e)))
-    }
-
-    /// Send a share invitation email.
-    pub async fn send_share_invitation(
-        &self,
-        invitee_email: &str,
-        owner_email: &str,
-        resource_path: &str,
-        permission: &str,
-    ) -> Result<ResendEmailResponse> {
-        let permission_text = match permission {
-            "editor" => "edit",
-            "commenter" => "comment on",
-            "viewer" => "view",
-            _ => "access",
-        };
-
-        let html = format!(
-            r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-</head>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto;">
-    <h1 style="color: #333;">You've been invited to collaborate</h1>
-    <p style="color: #666; font-size: 16px; line-height: 1.5;">
-        <strong>{}</strong> has shared a file with you and invited you to <strong>{}</strong> it.
-    </p>
-    <div style="background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 20px 0;">
-        <p style="margin: 0; color: #333; font-size: 14px;">
-            <strong>File:</strong> {}
-        </p>
-    </div>
-    <p style="color: #666; font-size: 16px; line-height: 1.5;">
-        Open Obsidian and go to <strong>Settings → Cloudflare Sync → View pending share invitations</strong> to accept this invitation.
-    </p>
-    <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
-    <p style="color: #999; font-size: 12px;">
-        If you don't have an account yet, you'll need to sign up first using the same email address ({}).
-    </p>
-</body>
-</html>"#,
-            owner_email, permission_text, resource_path, invitee_email
-        );
-
-        let request_body = ResendEmailRequest {
-            from: &self.from_email,
-            to: vec![invitee_email],
-            subject: &format!("{} shared a file with you", owner_email),
             html,
         };
 

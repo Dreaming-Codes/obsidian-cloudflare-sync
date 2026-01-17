@@ -1,12 +1,14 @@
 //! File route handlers for R2 storage operations.
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use urlencoding::decode;
 use worker::*;
 
 use crate::auth::JwtManager;
 use crate::models::FileUploadResponse;
-use crate::utils::{json_ok, no_content, ApiError, R2Helper};
+use crate::routes::ws::broadcast_sync_notification;
+use crate::utils::{json_ok, merge::MergeResult, no_content, ApiError, R2Helper};
 
 /// Query parameters for listing files.
 #[derive(Debug, Deserialize)]
@@ -23,6 +25,7 @@ pub struct ListFilesQuery {
 pub struct AuthContext {
     pub user_id: String,
     pub email: String,
+    pub device_id: String,
 }
 
 /// Get the User Durable Object stub.
@@ -54,6 +57,7 @@ pub fn extract_auth(req: &Request, env: &Env) -> Result<AuthContext> {
     Ok(AuthContext {
         user_id: token_data.claims.sub,
         email: token_data.claims.email,
+        device_id: token_data.claims.device_id,
     })
 }
 
@@ -188,6 +192,7 @@ async fn handle_get_file(env: Env, auth: AuthContext, file_path: &str) -> Result
 
 /// PUT /files/{path} - Upload or update a file.
 /// Stores content in R2 and metadata in User DO SQLite.
+/// Supports 3-way merge via X-Base-Hash header for conflict resolution.
 async fn handle_put_file(mut req: Request, env: Env, auth: AuthContext, file_path: &str) -> Result<Response> {
     if file_path.is_empty() {
         return ApiError::bad_request("File path is required").into_response();
@@ -212,6 +217,9 @@ async fn handle_put_file(mut req: Request, env: Env, auth: AuthContext, file_pat
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
 
+    // Get base hash for conflict detection (the version the client edited from)
+    let base_hash = req.headers().get("X-Base-Hash")?;
+
     // Get auth header for DO request
     let auth_header = req
         .headers()
@@ -219,13 +227,84 @@ async fn handle_put_file(mut req: Request, env: Env, auth: AuthContext, file_pat
         .unwrap_or_default();
 
     // Read body - empty files are allowed (0-byte files are valid in a vault)
-    let content = req.bytes().await?;
+    let uploaded_content = req.bytes().await?.to_vec();
 
     let bucket = env.bucket("VAULT_STORAGE")?;
     let r2 = R2Helper::new(&bucket);
 
+    // Check for conflicts and perform merge if needed
+    let existing_meta = r2.get_meta(&auth.user_id, &decoded_path).await?;
+    
+    let (final_content, merged, had_conflict) = if let Some(ref meta) = existing_meta {
+        // File exists - check for conflict
+        let current_hash = &meta.content_hash;
+        
+        // Calculate hash of uploaded content
+        let mut hasher = Sha256::new();
+        hasher.update(&uploaded_content);
+        let uploaded_hash = hex::encode(hasher.finalize());
+        
+        // If uploaded content is same as current, no change needed
+        if &uploaded_hash == current_hash {
+            return json_ok(&FileUploadResponse {
+                success: true,
+                path: decoded_path,
+                size: meta.size,
+                content_hash: meta.content_hash.clone(),
+                version_created: false,
+                merged: false,
+                had_conflict: false,
+            });
+        }
+        
+        // Check if we have a conflict (base_hash differs from current server hash)
+        if let Some(ref base) = base_hash {
+            if base != current_hash {
+                // CONFLICT DETECTED: The file on the server changed since the client's base version
+                
+                // Try to get the base version for 3-way merge
+                if let Some(base_content) = r2.get_version_by_hash(&auth.user_id, &decoded_path, base).await? {
+                    // Get current server content
+                    if let Some(remote_content) = r2.get_content(&auth.user_id, &decoded_path).await? {
+                        // Perform 3-way merge
+                        match crate::utils::merge::merge_text(&base_content, &uploaded_content, &remote_content) {
+                            MergeResult::Clean(merged_text) => {
+                                // Merge succeeded without conflicts
+                                (merged_text.into_bytes(), true, false)
+                            }
+                            MergeResult::Conflict(conflict_text) => {
+                                // Merge had conflicts - conflict markers inserted
+                                (conflict_text.into_bytes(), true, true)
+                            }
+                            MergeResult::NotMergeable => {
+                                // Binary file or can't merge - last-write-wins (uploaded content wins)
+                                (uploaded_content, false, false)
+                            }
+                        }
+                    } else {
+                        // Couldn't get remote content - just use uploaded
+                        (uploaded_content, false, false)
+                    }
+                } else {
+                    // Base version not found - can't merge, use uploaded content (last-write-wins)
+                    (uploaded_content, false, false)
+                }
+            } else {
+                // No conflict: base == current, safe to overwrite
+                (uploaded_content, false, false)
+            }
+        } else {
+            // No base hash provided - treat as blind overwrite (last-write-wins)
+            (uploaded_content, false, false)
+        }
+    } else {
+        // File doesn't exist - no conflict possible
+        (uploaded_content, false, false)
+    };
+
+    // Store the final content
     let (meta, version_created) = r2
-        .put_content(&auth.user_id, &decoded_path, content.to_vec(), &content_type, mtime)
+        .put_content(&auth.user_id, &decoded_path, final_content, &content_type, mtime)
         .await?;
 
     // Update metadata in User DO SQLite
@@ -254,12 +333,25 @@ async fn handle_put_file(mut req: Request, env: Env, auth: AuthContext, file_pat
     // The metadata will be eventually consistent
     let _ = stub.fetch_with_request(do_req).await;
 
+    // Broadcast sync notification to other devices
+    let _ = broadcast_sync_notification(
+        &env,
+        &auth.user_id,
+        &meta.path,
+        "upload",
+        &auth.device_id,
+        Some(&meta.content_hash),
+    )
+    .await;
+
     json_ok(&FileUploadResponse {
         success: true,
         path: meta.path,
         size: meta.size,
         content_hash: meta.content_hash,
         version_created,
+        merged,
+        had_conflict,
     })
 }
 
@@ -308,6 +400,17 @@ async fn handle_delete_file(req: Request, env: Env, auth: AuthContext, file_path
         )?;
 
         let _ = stub.fetch_with_request(do_req).await;
+
+        // Broadcast sync notification to other devices
+        let _ = broadcast_sync_notification(
+            &env,
+            &auth.user_id,
+            &decoded_path,
+            "delete",
+            &auth.device_id,
+            None,
+        )
+        .await;
 
         no_content()
     } else {

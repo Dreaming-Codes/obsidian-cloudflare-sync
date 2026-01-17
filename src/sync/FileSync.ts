@@ -1,19 +1,24 @@
 import { requestUrl, TFile } from 'obsidian';
 import type CloudflareSyncPlugin from '../main';
-import type { FileMeta, FileListResponse, FileVersionsResponse } from '../types';
+import type { FileMeta, FileListResponse, FileVersionsResponse, FileUploadResponse } from '../types';
 import { sha256 } from '../utils/hash';
 
 export interface UploadResult {
 	success: boolean;
 	path: string;
-	etag?: string;
+	contentHash?: string;
 	error?: string;
+	/** Whether a 3-way merge was performed on the server */
+	merged?: boolean;
+	/** Whether the merge had conflicts (conflict markers inserted) */
+	hadConflict?: boolean;
 }
 
 export interface DownloadResult {
 	success: boolean;
 	path: string;
 	content?: ArrayBuffer;
+	contentHash?: string;
 	error?: string;
 }
 
@@ -80,32 +85,44 @@ export class FileSync {
 			const content = await this.plugin.app.vault.readBinary(file);
 			const hash = await sha256(content);
 
+			// Get base hash for conflict detection (the version we edited from)
+			const baseHash = this.plugin.settings.fileBaseHashes[file.path];
+
+			const headers: Record<string, string> = {
+				...this.getHeaders(),
+				'Content-Type': this.getMimeType(file.extension),
+				'X-Content-Hash': hash,
+				'X-File-Mtime': file.stat.mtime.toString(),
+			};
+
+			// Include base hash if we have one (for 3-way merge on conflict)
+			if (baseHash) {
+				headers['X-Base-Hash'] = baseHash;
+			}
+
 			const response = await requestUrl({
 				url: `${this.baseUrl}/files/${encodeURIComponent(file.path)}`,
 				method: 'PUT',
-				headers: {
-					...this.getHeaders(),
-					'Content-Type': this.getMimeType(file.extension),
-					'X-Content-Hash': hash,
-					'X-File-Mtime': file.stat.mtime.toString(),
-				},
+				headers,
 				body: content,
 			});
 
-			const data = response.json as { success: boolean; etag?: string; message?: string };
+			const data = response.json as FileUploadResponse;
 
 			if (data.success) {
 				return {
 					success: true,
 					path: file.path,
-					etag: data.etag,
+					contentHash: data.contentHash,
+					merged: data.merged,
+					hadConflict: data.hadConflict,
 				};
 			}
 
 			return {
 				success: false,
 				path: file.path,
-				error: data.message ?? 'Upload failed',
+				error: 'Upload failed',
 			};
 		} catch (error) {
 			console.error(`Failed to upload ${file.path}:`, error);
@@ -128,10 +145,14 @@ export class FileSync {
 				headers: this.getHeaders(),
 			});
 
+			// Get content hash from response header
+			const contentHash = response.headers['x-file-hash'] || response.headers['X-File-Hash'];
+
 			return {
 				success: true,
 				path,
 				content: response.arrayBuffer,
+				contentHash,
 			};
 		} catch (error) {
 			console.error(`Failed to download ${path}:`, error);

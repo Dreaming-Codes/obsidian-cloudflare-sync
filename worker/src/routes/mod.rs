@@ -1,13 +1,9 @@
 //! Route handlers for the API.
 
 pub mod auth;
-pub mod comments;
 pub mod files;
-pub mod share;
-pub mod websocket;
+pub mod ws;
 
 pub use auth::handle_auth_routes;
-pub use comments::handle_comment_routes;
 pub use files::handle_file_routes;
-pub use share::{handle_share_routes, handle_shared_file_download};
-pub use websocket::handle_websocket_upgrade;
+pub use ws::handle_ws_routes;

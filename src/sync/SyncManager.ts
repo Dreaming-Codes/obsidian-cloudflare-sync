@@ -4,6 +4,7 @@ import type { FileMeta, SyncStatus } from '../types';
 import { FileSync } from './FileSync';
 import { FileChange, FileWatcher } from './FileWatcher';
 import { OfflineQueue, PendingOperation } from './OfflineQueue';
+import { WebSocketClient } from './WebSocketClient';
 
 interface SyncState {
 	/** Map of file path to remote metadata */
@@ -26,6 +27,7 @@ export class SyncManager {
 	private fileWatcher: FileWatcher;
 	private fileSync: FileSync;
 	private offlineQueue: OfflineQueue;
+	private wsClient: WebSocketClient;
 	private state: SyncState;
 	private isSyncing: boolean = false;
 	private syncInterval: ReturnType<typeof setInterval> | null = null;
@@ -39,6 +41,7 @@ export class SyncManager {
 		this.fileWatcher = new FileWatcher(plugin);
 		this.fileSync = new FileSync(plugin);
 		this.offlineQueue = new OfflineQueue(plugin);
+		this.wsClient = new WebSocketClient(plugin);
 		this.state = {
 			remoteFiles: new Map(),
 			localHashes: new Map(),
@@ -70,12 +73,20 @@ export class SyncManager {
 		this.fileWatcher.onFileChange(this.handleFileChange.bind(this));
 		console.log(`[SyncManager] File watcher started in ${Date.now() - t}ms`);
 
+		// Set up WebSocket for real-time sync notifications
+		this.wsClient.onSync(this.handleRemoteSyncNotification.bind(this));
+		this.wsClient.onStatusChange((status) => {
+			console.log(`[SyncManager] WebSocket status: ${status}`);
+		});
+
 		// Perform initial sync if online
 		if (this.offlineQueue.getIsOnline()) {
 			console.log('[SyncManager] Online - starting full sync in background...');
 			// Don't await - let it run in background
 			this.performFullSync().then(() => {
 				console.log('[SyncManager] Background full sync completed');
+				// Connect WebSocket after initial sync
+				this.wsClient.connect();
 			}).catch((err) => {
 				console.error('[SyncManager] Background full sync failed:', err);
 			});
@@ -105,6 +116,9 @@ export class SyncManager {
 			this.syncInterval = null;
 		}
 
+		// Disconnect WebSocket
+		this.wsClient.disconnect();
+
 		// Stop file watcher
 		this.fileWatcher.stop();
 
@@ -125,6 +139,9 @@ export class SyncManager {
 			this.plugin.notificationManager.success('Back online - syncing changes');
 			this.plugin.setSyncStatus('syncing');
 
+			// Reconnect WebSocket
+			this.wsClient.connect();
+
 			// Process any queued operations first
 			await this.processOfflineQueue();
 
@@ -133,6 +150,42 @@ export class SyncManager {
 		} else {
 			this.plugin.setSyncStatus('offline');
 			this.plugin.notificationManager.warning('Offline - changes will be queued');
+			// Disconnect WebSocket when offline
+			this.wsClient.disconnect();
+		}
+	}
+
+	/**
+	 * Handle real-time sync notification from WebSocket.
+	 * Called when another device uploads or deletes a file.
+	 */
+	private async handleRemoteSyncNotification(
+		path: string,
+		action: 'upload' | 'delete',
+		originDevice: string,
+		contentHash?: string
+	): Promise<void> {
+		// Ignore notifications from our own device
+		const myDeviceId = this.plugin.settings.deviceId;
+		if (originDevice === myDeviceId) {
+			return;
+		}
+
+		console.log(`[SyncManager] Remote sync notification: ${action} ${path} from device ${originDevice}`);
+
+		if (action === 'upload') {
+			// Another device uploaded a file - download it
+			await this.downloadFile(path);
+		} else if (action === 'delete') {
+			// Another device deleted a file - delete locally
+			const file = this.plugin.app.vault.getAbstractFileByPath(path);
+			if (file instanceof TFile) {
+				console.log(`[SyncManager] Deleting local file ${path} (deleted on another device)`);
+				await this.plugin.app.vault.delete(file);
+				// Remove base hash
+				delete this.plugin.settings.fileBaseHashes[path];
+				await this.plugin.saveSettings();
+			}
 		}
 	}
 
@@ -317,17 +370,25 @@ export class SyncManager {
 			}
 			console.log('[SyncManager] Remote metadata cleared');
 
-			// 2. Get all local files
+			// 2. Clear local base hashes since we're starting fresh
+			this.plugin.settings.fileBaseHashes = {};
+			await this.plugin.saveSettings();
+
+			// 3. Get all local files
 			const localFiles = this.fileWatcher.getAllSyncableFiles();
 			console.log(`[SyncManager] Uploading ${localFiles.length} local files...`);
 
-			// 3. Upload all local files
+			// 4. Upload all local files
 			let uploaded = 0;
 			let failed = 0;
 			for (const file of localFiles) {
 				const result = await this.fileSync.uploadFile(file);
 				if (result.success) {
 					uploaded++;
+					// Track base hash for future conflict detection
+					if (result.contentHash) {
+						this.plugin.settings.fileBaseHashes[file.path] = result.contentHash;
+					}
 				} else {
 					failed++;
 					console.error(`[SyncManager] Failed to upload ${file.path}: ${result.error}`);
@@ -338,6 +399,9 @@ export class SyncManager {
 					console.log(`[SyncManager] Progress: ${uploaded + failed}/${localFiles.length} files`);
 				}
 			}
+
+			// Save base hashes
+			await this.plugin.saveSettings();
 
 			// 4. Update state
 			this.state.remoteFiles.clear();
@@ -509,14 +573,58 @@ export class SyncManager {
 		const result = await this.fileSync.uploadFile(file);
 
 		if (result.success) {
+			// Update base hash for future conflict detection
+			if (result.contentHash) {
+				this.plugin.settings.fileBaseHashes[file.path] = result.contentHash;
+				// Don't await - save in background to not slow down sync
+				this.plugin.saveSettings();
+			}
+
 			// Update local hash cache
 			const hash = await this.fileSync.getLocalFileHash(file);
 			this.state.localHashes.set(file.path, hash);
+
+			// Handle merge results
+			if (result.merged) {
+				if (result.hadConflict) {
+					// Server merged with conflicts - need to re-download to get merged content
+					this.plugin.notificationManager.warning(
+						`Conflict in ${file.path} - please review conflict markers`
+					);
+					// Re-download to get the merged content with conflict markers
+					await this.downloadAndUpdateFile(file.path);
+				} else {
+					// Clean merge - re-download to get the merged content
+					this.plugin.notificationManager.info(`Merged changes in ${file.path}`);
+					await this.downloadAndUpdateFile(file.path);
+				}
+			}
 		} else {
 			console.error(`Upload failed for ${file.path}:`, result.error);
 		}
 
 		return result.success;
+	}
+
+	/**
+	 * Download a file and update base hash
+	 */
+	private async downloadAndUpdateFile(path: string): Promise<boolean> {
+		const result = await this.fileSync.downloadFile(path);
+
+		if (result.success && result.content) {
+			const written = await this.fileSync.writeToVault(path, result.content);
+			
+			if (written && result.contentHash) {
+				// Update base hash to match downloaded content
+				this.plugin.settings.fileBaseHashes[path] = result.contentHash;
+				await this.plugin.saveSettings();
+			}
+
+			return written;
+		}
+
+		return false;
 	}
 
 	/**
@@ -526,7 +634,16 @@ export class SyncManager {
 		const result = await this.fileSync.downloadFile(path);
 
 		if (result.success && result.content) {
-			return await this.fileSync.writeToVault(path, result.content);
+			const written = await this.fileSync.writeToVault(path, result.content);
+			
+			if (written && result.contentHash) {
+				// Update base hash to match downloaded content
+				this.plugin.settings.fileBaseHashes[path] = result.contentHash;
+				// Don't await - save in background
+				this.plugin.saveSettings();
+			}
+
+			return written;
 		}
 
 		return false;

@@ -17,11 +17,13 @@ pub struct Claims {
     pub exp: i64,
     /// Session ID for invalidation
     pub session_id: String,
+    /// Device ID for multi-device sync tracking
+    pub device_id: String,
 }
 
 impl Claims {
     /// Create new claims for a user.
-    pub fn new(user_id: &str, email: &str, session_id: &str, expires_in_hours: i64) -> Self {
+    pub fn new(user_id: &str, email: &str, session_id: &str, device_id: &str, expires_in_hours: i64) -> Self {
         let now = Utc::now();
         let exp = now + Duration::hours(expires_in_hours);
 
@@ -31,6 +33,7 @@ impl Claims {
             iat: now.timestamp(),
             exp: exp.timestamp(),
             session_id: session_id.to_string(),
+            device_id: device_id.to_string(),
         }
     }
 
@@ -74,9 +77,10 @@ impl JwtManager {
         user_id: &str,
         email: &str,
         session_id: &str,
+        device_id: &str,
     ) -> Result<String, jsonwebtoken::errors::Error> {
         // Access tokens expire in 24 hours
-        let claims = Claims::new(user_id, email, session_id, 24);
+        let claims = Claims::new(user_id, email, session_id, device_id, 24);
         self.encode(&claims)
     }
 
@@ -86,9 +90,10 @@ impl JwtManager {
         user_id: &str,
         email: &str,
         session_id: &str,
+        device_id: &str,
     ) -> Result<String, jsonwebtoken::errors::Error> {
         // Refresh tokens expire in 30 days
-        let claims = Claims::new(user_id, email, session_id, 24 * 30);
+        let claims = Claims::new(user_id, email, session_id, device_id, 24 * 30);
         self.encode(&claims)
     }
 }
@@ -100,7 +105,7 @@ mod tests {
     #[test]
     fn test_jwt_roundtrip() {
         let manager = JwtManager::new("test-secret");
-        let claims = Claims::new("user-123", "test@example.com", "session-456", 24);
+        let claims = Claims::new("user-123", "test@example.com", "session-456", "device-789", 24);
 
         let token = manager.encode(&claims).unwrap();
         let decoded = manager.decode(&token).unwrap();
@@ -108,5 +113,6 @@ mod tests {
         assert_eq!(decoded.claims.sub, "user-123");
         assert_eq!(decoded.claims.email, "test@example.com");
         assert_eq!(decoded.claims.session_id, "session-456");
+        assert_eq!(decoded.claims.device_id, "device-789");
     }
 }

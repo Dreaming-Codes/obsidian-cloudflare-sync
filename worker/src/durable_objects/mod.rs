@@ -1,7 +1,7 @@
 //! Durable Object implementations for sync coordination.
 
-pub mod document;
+pub mod sync_notify;
 pub mod user;
 
-pub use document::DocumentDurableObject;
+pub use sync_notify::SyncNotifyDurableObject;
 pub use user::UserDurableObject;

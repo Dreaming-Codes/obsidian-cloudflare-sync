@@ -10,16 +10,24 @@ binding = "VAULT_STORAGE"
 bucket_name = "obsidian-vault-storage"
 
 [[durable_objects.bindings]]
-name = "DOCUMENT_DO"
-class_name = "DocumentDurableObject"
-
-[[durable_objects.bindings]]
 name = "USER_DO"
 class_name = "UserDurableObject"
 
+[[durable_objects.bindings]]
+name = "SYNC_NOTIFY_DO"
+class_name = "SyncNotifyDurableObject"
+
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["DocumentDurableObject", "UserDurableObject"]
+new_sqlite_classes = ["UserDurableObject"]
+
+[[migrations]]
+tag = "v2"
+deleted_classes = ["DocumentDurableObject"]
+
+[[migrations]]
+tag = "v3"
+new_classes = ["SyncNotifyDurableObject"]
 
 [vars]
 BASE_URL = "https://sync.elysiumcraftrp.org"

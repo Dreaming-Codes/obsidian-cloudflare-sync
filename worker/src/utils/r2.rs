@@ -39,6 +39,12 @@ impl R2Keys {
         format!("{}/files/{}/versions/{}", user_id, path_hash, timestamp)
     }
 
+    /// Get the R2 key for a version stored by content hash.
+    pub fn version_by_hash_key(user_id: &str, path: &str, content_hash: &str) -> String {
+        let path_hash = Self::hash_path(path);
+        format!("{}/files/{}/versions-by-hash/{}", user_id, path_hash, content_hash)
+    }
+
     /// Get the prefix for listing all versions of a file.
     pub fn versions_prefix(user_id: &str, path: &str) -> String {
         let path_hash = Self::hash_path(path);
@@ -181,23 +187,58 @@ impl<'a> R2Helper<'a> {
     }
 
     /// Create a version backup of the current file content.
+    /// Stores by both timestamp (for history listing) and content hash (for merge base lookup).
     async fn create_version(&self, user_id: &str, path: &str, meta: &FileMeta) -> Result<()> {
         // Get current content
         if let Some(content) = self.get_content(user_id, path).await? {
             let timestamp = meta.updated_at;
+            
+            // Store by timestamp for version history
             let version_key = R2Keys::version_key(user_id, path, timestamp);
-
             self.bucket
-                .put(&version_key, content)
+                .put(&version_key, content.clone())
                 .http_metadata(HttpMetadata {
                     content_type: Some(meta.content_type.clone()),
                     ..Default::default()
                 })
                 .execute()
                 .await?;
+
+            // Store by content hash for merge base lookup (if not already stored)
+            let hash_key = R2Keys::version_by_hash_key(user_id, path, &meta.content_hash);
+            // Only store if this hash version doesn't already exist
+            if self.bucket.get(&hash_key).execute().await?.is_none() {
+                self.bucket
+                    .put(&hash_key, content)
+                    .http_metadata(HttpMetadata {
+                        content_type: Some(meta.content_type.clone()),
+                        ..Default::default()
+                    })
+                    .execute()
+                    .await?;
+            }
         }
 
         Ok(())
+    }
+
+    /// Get a file version by its content hash (for merge base lookup).
+    pub async fn get_version_by_hash(&self, user_id: &str, path: &str, content_hash: &str) -> Result<Option<Vec<u8>>> {
+        let key = R2Keys::version_by_hash_key(user_id, path, content_hash);
+        let obj = self.bucket.get(&key).execute().await?;
+
+        match obj {
+            Some(o) => {
+                match o.body() {
+                    Some(body) => {
+                        let bytes = body.bytes().await?;
+                        Ok(Some(bytes.to_vec()))
+                    }
+                    None => Ok(Some(Vec::new())),
+                }
+            }
+            None => Ok(None),
+        }
     }
 
     /// Soft delete a file (marks as deleted but keeps data).

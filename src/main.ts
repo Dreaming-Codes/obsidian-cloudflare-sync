@@ -1,38 +1,25 @@
-import { MarkdownView, Plugin, TFile, TFolder, Menu } from 'obsidian';
+import { Plugin, TFile } from 'obsidian';
 import { AuthManager } from './auth/AuthManager';
 import { MagicLinkModal } from './auth/MagicLinkModal';
-import { CommentManager } from './comments/CommentManager';
-import { CommentsModal } from './comments/CommentView';
 import { CloudflareSyncSettingTab, CloudflareSyncSettings, DEFAULT_SETTINGS } from './settings';
-import { ShareManager } from './sharing/ShareManager';
-import { PendingSharesModal, ShareModal, SharedWithMeModal } from './sharing/ShareModal';
-import { RealtimeSyncManager } from './sync/RealtimeSyncManager';
-import { SharedFileCacheManager } from './sync/SharedFileCacheManager';
 import { SyncManager } from './sync/SyncManager';
-import type { ConnectionStatus, ShareInvite, SyncStatus } from './types';
+import type { ConnectionStatus, SyncStatus } from './types';
 import { NotificationManager } from './ui/NotificationManager';
-import { registerSharedFileView } from './ui/SharedFileView';
 import { StatusBar } from './ui/StatusBar';
 
 /**
  * Cloudflare Sync Plugin for Obsidian
  *
- * Provides real-time collaborative sync using Cloudflare infrastructure:
+ * Provides file sync using Cloudflare infrastructure:
  * - R2 for file storage
- * - Durable Objects for real-time sync
  * - Workers for API and authentication
  */
 export default class CloudflareSyncPlugin extends Plugin {
 	settings!: CloudflareSyncSettings;
 	authManager!: AuthManager;
 	notificationManager!: NotificationManager;
-	shareManager!: ShareManager;
-	commentManager!: CommentManager;
 	private statusBar!: StatusBar;
 	private syncManager: SyncManager | null = null;
-	private realtimeSyncManager: RealtimeSyncManager | null = null;
-	private sharedFileCacheManager: SharedFileCacheManager | null = null;
-	private sharedFileMetadata: Map<string, ShareInvite> = new Map();
 
 	// Connection and sync state
 	private connectionStatus: ConnectionStatus = 'disconnected';
@@ -45,14 +32,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 		// Initialize managers
 		this.authManager = new AuthManager(this);
 		this.notificationManager = new NotificationManager(this);
-		this.shareManager = new ShareManager(this);
-		this.commentManager = new CommentManager(this);
 		this.statusBar = new StatusBar(this);
-		this.sharedFileCacheManager = new SharedFileCacheManager(this.app);
-		await this.sharedFileCacheManager.initialize();
-
-		// Register custom views
-		registerSharedFileView(this);
 
 		// Initialize auth (check token validity, schedule refresh)
 		await this.authManager.initialize();
@@ -65,9 +45,6 @@ export default class CloudflareSyncPlugin extends Plugin {
 
 		// Register commands
 		this.registerCommands();
-
-		// Register file menu integration
-		this.registerFileMenu();
 
 		// Start sync if enabled and authenticated
 		if (this.settings.syncEnabled && this.authManager.isAuthenticated()) {
@@ -82,11 +59,9 @@ export default class CloudflareSyncPlugin extends Plugin {
 		// Clean up managers
 		this.authManager?.cleanup();
 		this.statusBar?.cleanup();
-		this.sharedFileCacheManager?.cleanup();
 
 		// Stop any active sync
 		this.stopSync();
-		this.stopRealtimeSync();
 	}
 
 	// ============================================================================
@@ -260,117 +235,6 @@ export default class CloudflareSyncPlugin extends Plugin {
 		return this.syncManager;
 	}
 
-	/**
-	 * Get the shared file cache manager instance
-	 */
-	getSharedFileCacheManager(): SharedFileCacheManager | null {
-		return this.sharedFileCacheManager;
-	}
-
-	/**
-	 * Store metadata for a shared file by its cache path.
-	 */
-	setSharedFileMetadata(cachePath: string, share: ShareInvite): void {
-		this.sharedFileMetadata.set(cachePath, share);
-	}
-
-	/**
-	 * Get metadata for a shared file by its cache path.
-	 */
-	getSharedFileMetadata(cachePath: string): ShareInvite | undefined {
-		return this.sharedFileMetadata.get(cachePath);
-	}
-
-	/**
-	 * Check if a file is a shared file cache.
-	 */
-	isSharedCacheFile(path: string): boolean {
-		return this.sharedFileCacheManager?.isCacheFile(path) ?? false;
-	}
-
-	// ============================================================================
-	// Real-time Sync Operations
-	// ============================================================================
-
-	/**
-	 * Start real-time collaborative sync
-	 */
-	async startRealtimeSync(): Promise<void> {
-		if (!this.authManager.isAuthenticated()) {
-			return;
-		}
-
-		if (this.realtimeSyncManager) {
-			// Already running
-			return;
-		}
-
-		try {
-			this.realtimeSyncManager = new RealtimeSyncManager({
-				app: this.app,
-				serverUrl: this.settings.serverUrl,
-				getToken: () => this.authManager.getValidToken(),
-				getUserId: () => this.authManager.getUserId(),
-				getCacheManager: () => this.sharedFileCacheManager,
-				onStatusChange: (status) => {
-					if (status === 'connected') {
-						this.notificationManager.success('Real-time sync connected');
-					} else if (status === 'error') {
-						this.notificationManager.error('Real-time sync disconnected');
-					}
-				},
-				onCollaboratorJoin: (_docId, _userId, email) => {
-					this.notificationManager.info(`${email} joined`);
-				},
-				onCollaboratorLeave: (_docId, userId) => {
-					this.notificationManager.info(`${userId} left`);
-				},
-			});
-
-			await this.realtimeSyncManager.enable();
-
-			// Register file open handler
-			this.registerEvent(
-				this.app.workspace.on('file-open', async (file) => {
-					if (file && this.realtimeSyncManager) {
-						await this.realtimeSyncManager.subscribeToFile(file);
-					}
-				})
-			);
-
-			// Register editor change handler - capture edits and send to CRDT
-			this.registerEvent(
-				this.app.workspace.on('editor-change', (editor, info) => {
-					if (this.realtimeSyncManager && info.file) {
-						this.realtimeSyncManager.handleEditorChange(editor, info.file);
-					}
-				})
-			);
-
-			console.log('[CloudflareSyncPlugin] Real-time sync started');
-		} catch (error) {
-			console.error('Failed to start real-time sync:', error);
-			this.realtimeSyncManager = null;
-		}
-	}
-
-	/**
-	 * Stop real-time collaborative sync
-	 */
-	stopRealtimeSync(): void {
-		if (this.realtimeSyncManager) {
-			this.realtimeSyncManager.destroy();
-			this.realtimeSyncManager = null;
-		}
-	}
-
-	/**
-	 * Get the real-time sync manager instance
-	 */
-	getRealtimeSyncManager(): RealtimeSyncManager | null {
-		return this.realtimeSyncManager;
-	}
-
 	// ============================================================================
 	// Commands
 	// ============================================================================
@@ -443,108 +307,5 @@ export default class CloudflareSyncPlugin extends Plugin {
 				return true;
 			},
 		});
-
-		// Share current file command
-		this.addCommand({
-			id: 'share-current-file',
-			name: 'Share current file',
-			checkCallback: (checking) => {
-				if (!this.authManager.isAuthenticated()) {
-					return false;
-				}
-				const file = this.app.workspace.getActiveFile();
-				if (!file) {
-					return false;
-				}
-				if (!checking) {
-					new ShareModal(this, file).open();
-				}
-				return true;
-			},
-		});
-
-		// View pending shares command
-		this.addCommand({
-			id: 'view-pending-shares',
-			name: 'View pending share invitations',
-			checkCallback: (checking) => {
-				if (!this.authManager.isAuthenticated()) {
-					return false;
-				}
-				if (!checking) {
-					new PendingSharesModal(this).open();
-				}
-				return true;
-			},
-		});
-
-		// View shared with me command
-		this.addCommand({
-			id: 'view-shared-with-me',
-			name: 'View files shared with me',
-			checkCallback: (checking) => {
-				if (!this.authManager.isAuthenticated()) {
-					return false;
-				}
-				if (!checking) {
-					new SharedWithMeModal(this).open();
-				}
-				return true;
-			},
-		});
-
-		// View comments on current file command
-		this.addCommand({
-			id: 'view-comments',
-			name: 'View comments on current file',
-			checkCallback: (checking) => {
-				if (!this.authManager.isAuthenticated()) {
-					return false;
-				}
-				const file = this.app.workspace.getActiveFile();
-				if (!file) {
-					return false;
-				}
-				if (!checking) {
-					new CommentsModal(this, file).open();
-				}
-				return true;
-			},
-		});
-	}
-
-	/**
-	 * Register file menu integration for sharing.
-	 */
-	private registerFileMenu(): void {
-		// Add "Share" to file context menu
-		this.registerEvent(
-			this.app.workspace.on('file-menu', (menu, file) => {
-				if (!this.authManager.isAuthenticated()) {
-					return;
-				}
-
-				menu.addItem((item) => {
-					item
-						.setTitle('Share...')
-						.setIcon('share')
-						.onClick(() => {
-							new ShareModal(this, file).open();
-						});
-				});
-
-				// Add "Comments" to file context menu (only for files, not folders)
-				if (file instanceof TFile) {
-					menu.addItem((item) => {
-						item
-							.setTitle('Comments...')
-							.setIcon('message-square')
-							.onClick(() => {
-								new CommentsModal(this, file).open();
-							});
-					});
-				}
-			})
-		);
 	}
 }

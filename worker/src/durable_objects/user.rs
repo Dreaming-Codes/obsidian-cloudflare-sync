@@ -2,13 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
-use worker::{SqlCursor, *};
+use worker::*;
 
 use crate::auth::{JwtManager, MagicLinkManager};
-use crate::models::{
-    CreateShareRequest, FileMeta, ListFilesResponse, ListSharesResponse, ResourceType, ShareInvite, SharePermission,
-    ShareResponse, UpdateShareRequest,
-};
+use crate::models::{FileMeta, ListFilesResponse};
 use crate::utils::{json_ok, ApiError};
 
 /// SQL schema for the User Durable Object.
@@ -25,8 +22,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
-    device_info TEXT,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    device_id TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (device_id) REFERENCES devices(id)
 );
 
 CREATE TABLE IF NOT EXISTS magic_links (
@@ -37,27 +35,43 @@ CREATE TABLE IF NOT EXISTS magic_links (
     used INTEGER DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS shares (
+CREATE TABLE IF NOT EXISTS devices (
     id TEXT PRIMARY KEY,
-    resource_path TEXT NOT NULL,
-    resource_type TEXT NOT NULL,
-    owner_id TEXT NOT NULL,
-    owner_email TEXT NOT NULL,
-    invitee_email TEXT NOT NULL,
-    invitee_id TEXT,
-    permission TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    platform TEXT,
+    last_seen_at INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
-    accepted_at INTEGER
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS device_file_sync (
+    device_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    last_synced_hash TEXT NOT NULL,
+    last_synced_at INTEGER NOT NULL,
+    PRIMARY KEY (device_id, path),
+    FOREIGN KEY (device_id) REFERENCES devices(id)
+);
+
+CREATE TABLE IF NOT EXISTS file_versions (
+    user_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, path, content_hash),
+    FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_device_id ON sessions(device_id);
 CREATE INDEX IF NOT EXISTS idx_magic_links_email ON magic_links(email);
 CREATE INDEX IF NOT EXISTS idx_magic_links_expires_at ON magic_links(expires_at);
-CREATE INDEX IF NOT EXISTS idx_shares_owner_id ON shares(owner_id);
-CREATE INDEX IF NOT EXISTS idx_shares_invitee_email ON shares(invitee_email);
-CREATE INDEX IF NOT EXISTS idx_shares_invitee_id ON shares(invitee_id);
-CREATE INDEX IF NOT EXISTS idx_shares_resource_path ON shares(resource_path);
+CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_device_file_sync_path ON device_file_sync(path);
+CREATE INDEX IF NOT EXISTS idx_file_versions_path ON file_versions(user_id, path);
 
 CREATE TABLE IF NOT EXISTS files (
     path TEXT NOT NULL,
@@ -112,7 +126,43 @@ pub struct Session {
     pub user_id: String,
     pub created_at: i64,
     pub expires_at: i64,
-    pub device_info: Option<String>,
+    pub device_id: Option<String>,
+}
+
+/// Device data model.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Device {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub platform: Option<String>,
+    pub last_seen_at: i64,
+    pub created_at: i64,
+}
+
+/// SQL row for device query.
+#[derive(Debug, Deserialize)]
+struct DeviceRow {
+    id: String,
+    user_id: String,
+    name: String,
+    platform: Option<String>,
+    last_seen_at: i64,
+    created_at: i64,
+}
+
+impl From<DeviceRow> for Device {
+    fn from(row: DeviceRow) -> Self {
+        Self {
+            id: row.id,
+            user_id: row.user_id,
+            name: row.name,
+            platform: row.platform,
+            last_seen_at: row.last_seen_at,
+            created_at: row.created_at,
+        }
+    }
 }
 
 /// Magic link data model.
@@ -142,6 +192,7 @@ struct SessionWithEmailRow {
     user_id: String,
     expires_at: i64,
     email: String,
+    device_id: Option<String>,
 }
 
 /// Request to create a magic link.
@@ -164,10 +215,17 @@ pub struct CreateMagicLinkResponse {
 
 /// Request to verify a magic link.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerifyMagicLinkRequest {
     pub token: String,
+    /// Device name (e.g., "MacBook Pro", "iPhone 15")
+    pub device_name: String,
+    /// Platform (e.g., "macos", "ios", "windows", "android", "linux")
     #[serde(default)]
-    pub device_info: Option<String>,
+    pub platform: Option<String>,
+    /// Existing device ID if re-authenticating on same device
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 /// Response with auth tokens.
@@ -178,6 +236,7 @@ pub struct AuthTokenResponse {
     pub refresh_token: String,
     pub expires_at: i64,
     pub user: User,
+    pub device: Device,
 }
 
 /// Request to refresh a token.
@@ -267,18 +326,6 @@ impl DurableObject for UserDurableObject {
             (Method::Post, "/logout") => self.handle_logout(req).await,
             (Method::Get, "/user") => self.handle_get_user(req).await,
             (Method::Delete, "/sessions") => self.handle_delete_sessions(req).await,
-            // Share routes
-            (Method::Post, "/shares") => self.handle_create_share(req).await,
-            (Method::Get, "/shares") => self.handle_list_my_shares(req).await,
-            (Method::Get, "/shared-with-me") => self.handle_list_shared_with_me(req).await,
-            (Method::Get, p) if p.starts_with("/shares/") => self.handle_get_share(req, &p[8..]).await,
-            (Method::Put, p) if p.starts_with("/shares/") => self.handle_update_share(req, &p[8..]).await,
-            (Method::Delete, p) if p.starts_with("/shares/") => self.handle_delete_share(req, &p[8..]).await,
-            (Method::Post, p) if p.ends_with("/accept") && p.starts_with("/shares/") => {
-                let share_id = &p[8..p.len() - 7]; // Remove "/shares/" and "/accept"
-                self.handle_accept_share(req, share_id).await
-            }
-            (Method::Get, "/permissions") => self.handle_check_permission(req).await,
             // File metadata routes
             (Method::Get, "/files") => self.handle_list_files(req).await,
             (Method::Put, "/files") => self.handle_upsert_file(req).await,
@@ -411,31 +458,110 @@ impl UserDurableObject {
             }
         };
 
+        // Find or create device
+        let device = if let Some(existing_device_id) = body.device_id {
+            // Try to find existing device
+            let device_cursor = self.state.storage().sql().exec(
+                "SELECT id, user_id, name, platform, last_seen_at, created_at FROM devices WHERE id = ?1 AND user_id = ?2",
+                vec![existing_device_id.clone().into(), user.id.clone().into()],
+            )?;
+
+            let existing_device: Option<DeviceRow> = device_cursor.next::<DeviceRow>().next().transpose()?;
+
+            match existing_device {
+                Some(d) => {
+                    // Update last_seen_at and name/platform
+                    self.state.storage().sql().exec(
+                        "UPDATE devices SET name = ?1, platform = ?2, last_seen_at = ?3 WHERE id = ?4",
+                        vec![
+                            body.device_name.clone().into(),
+                            body.platform.clone().unwrap_or_default().into(),
+                            now.into(),
+                            existing_device_id.into(),
+                        ],
+                    )?;
+                    Device {
+                        id: d.id,
+                        user_id: d.user_id,
+                        name: body.device_name,
+                        platform: body.platform,
+                        last_seen_at: now,
+                        created_at: d.created_at,
+                    }
+                }
+                None => {
+                    // Device ID provided but not found, create new device
+                    let device_id = uuid::Uuid::new_v4().to_string();
+                    self.state.storage().sql().exec(
+                        "INSERT INTO devices (id, user_id, name, platform, last_seen_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        vec![
+                            device_id.clone().into(),
+                            user.id.clone().into(),
+                            body.device_name.clone().into(),
+                            body.platform.clone().unwrap_or_default().into(),
+                            now.into(),
+                            now.into(),
+                        ],
+                    )?;
+                    Device {
+                        id: device_id,
+                        user_id: user.id.clone(),
+                        name: body.device_name,
+                        platform: body.platform,
+                        last_seen_at: now,
+                        created_at: now,
+                    }
+                }
+            }
+        } else {
+            // Create new device
+            let device_id = uuid::Uuid::new_v4().to_string();
+            self.state.storage().sql().exec(
+                "INSERT INTO devices (id, user_id, name, platform, last_seen_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                vec![
+                    device_id.clone().into(),
+                    user.id.clone().into(),
+                    body.device_name.clone().into(),
+                    body.platform.clone().unwrap_or_default().into(),
+                    now.into(),
+                    now.into(),
+                ],
+            )?;
+            Device {
+                id: device_id,
+                user_id: user.id.clone(),
+                name: body.device_name,
+                platform: body.platform,
+                last_seen_at: now,
+                created_at: now,
+            }
+        };
+
         // Create session
         let session_id = uuid::Uuid::new_v4().to_string();
         let jwt_manager = self.get_jwt_manager()?;
 
         let access_token = jwt_manager
-            .create_access_token(&user.id, &user.email, &session_id)
+            .create_access_token(&user.id, &user.email, &session_id, &device.id)
             .map_err(|e| Error::RustError(format!("Failed to create access token: {}", e)))?;
 
         let refresh_token = jwt_manager
-            .create_refresh_token(&user.id, &user.email, &session_id)
+            .create_refresh_token(&user.id, &user.email, &session_id, &device.id)
             .map_err(|e| Error::RustError(format!("Failed to create refresh token: {}", e)))?;
 
-        // Store session (refresh token hash)
+        // Store session (refresh token hash) linked to device
         let refresh_token_hash = manager.hash_token(&refresh_token);
         let expires_at = now + (30 * 24 * 60 * 60); // 30 days
 
         self.state.storage().sql().exec(
-            "INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at, device_info) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at, device_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             vec![
                 session_id.into(),
                 user.id.clone().into(),
                 refresh_token_hash.into(),
                 now.into(),
                 expires_at.into(),
-                body.device_info.unwrap_or_default().into(),
+                device.id.clone().into(),
             ],
         )?;
 
@@ -444,6 +570,7 @@ impl UserDurableObject {
             refresh_token,
             expires_at: now + (24 * 60 * 60), // Access token expires in 24 hours
             user,
+            device,
         })
     }
 
@@ -454,9 +581,9 @@ impl UserDurableObject {
         let token_hash = manager.hash_token(&body.refresh_token);
         let now = chrono::Utc::now().timestamp();
 
-        // Find the session
+        // Find the session with device_id
         let cursor = self.state.storage().sql().exec(
-            "SELECT s.id, s.user_id, s.expires_at, u.email FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.token_hash = ?1",
+            "SELECT s.id, s.user_id, s.expires_at, s.device_id, u.email FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.token_hash = ?1",
             vec![token_hash.into()],
         )?;
 
@@ -468,25 +595,31 @@ impl UserDurableObject {
                     return ApiError::unauthorized("Session expired").into_response();
                 }
 
-                (r.id, r.user_id, r.email)
+                (r.id, r.user_id, r.email, r.device_id)
             }
             None => {
                 return ApiError::unauthorized("Invalid refresh token").into_response();
             }
         };
 
-        let (session_id, user_id, email) = session;
+        let (session_id, user_id, email, device_id) = session;
+
+        // device_id is required for token creation
+        let dev_id = match &device_id {
+            Some(id) => id.clone(),
+            None => return ApiError::internal("Session has no associated device").into_response(),
+        };
 
         // Create new access token
         let jwt_manager = self.get_jwt_manager()?;
         let access_token = jwt_manager
-            .create_access_token(&user_id, &email, &session_id)
+            .create_access_token(&user_id, &email, &session_id, &dev_id)
             .map_err(|e| Error::RustError(format!("Failed to create access token: {}", e)))?;
 
         // Get full user data
         let user_cursor = self.state.storage().sql().exec(
             "SELECT id, email, created_at FROM users WHERE id = ?1",
-            vec![user_id.into()],
+            vec![user_id.clone().into()],
         )?;
 
         let user: Option<UserRow> = user_cursor.next::<UserRow>().next().transpose()?;
@@ -498,11 +631,41 @@ impl UserDurableObject {
             }
         };
 
+        // Get device data and update last_seen_at
+        let device = if let Some(dev_id) = device_id {
+            let device_cursor = self.state.storage().sql().exec(
+                "SELECT id, user_id, name, platform, last_seen_at, created_at FROM devices WHERE id = ?1",
+                vec![dev_id.clone().into()],
+            )?;
+
+            let device_row: Option<DeviceRow> = device_cursor.next::<DeviceRow>().next().transpose()?;
+
+            match device_row {
+                Some(d) => {
+                    // Update last_seen_at
+                    self.state.storage().sql().exec(
+                        "UPDATE devices SET last_seen_at = ?1 WHERE id = ?2",
+                        vec![now.into(), dev_id.into()],
+                    )?;
+                    Device::from(DeviceRow {
+                        last_seen_at: now,
+                        ..d
+                    })
+                }
+                None => {
+                    return ApiError::internal("Device not found").into_response();
+                }
+            }
+        } else {
+            return ApiError::internal("Session has no associated device").into_response();
+        };
+
         json_ok(&AuthTokenResponse {
             access_token,
             refresh_token: body.refresh_token, // Return the same refresh token
             expires_at: now + (24 * 60 * 60),
             user,
+            device,
         })
     }
 
@@ -586,9 +749,9 @@ impl UserDurableObject {
         }))
     }
 
-    // ========================================================================
-    // Share Handlers
-    // ========================================================================
+    // ============================================================================
+    // File Metadata Handlers
+    // ============================================================================
 
     /// Extract and validate JWT claims from request.
     fn extract_claims(&self, req: &Request) -> Result<crate::auth::Claims> {
@@ -605,405 +768,6 @@ impl UserDurableObject {
             .map(|data| data.claims)
             .map_err(|e| Error::RustError(format!("Invalid token: {}", e)))
     }
-
-    /// Handle creating a new share.
-    async fn handle_create_share(&self, mut req: Request) -> Result<Response> {
-        let claims = match self.extract_claims(&req) {
-            Ok(c) => c,
-            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
-        };
-
-        let body: CreateShareRequest = req.json().await?;
-
-        if !body.is_valid() {
-            return ApiError::bad_request("Invalid share request").into_response();
-        }
-
-        // Cannot share with yourself
-        if body.invitee_email.to_lowercase() == claims.email.to_lowercase() {
-            return ApiError::bad_request("Cannot share with yourself").into_response();
-        }
-
-        // Cannot share with owner permission
-        if body.permission == SharePermission::Owner {
-            return ApiError::bad_request("Cannot share with owner permission").into_response();
-        }
-
-        let now = chrono::Utc::now().timestamp();
-        let share_id = uuid::Uuid::new_v4().to_string();
-
-        // Check if share already exists for this resource/invitee combination
-        let existing_cursor = self.state.storage().sql().exec(
-            "SELECT id FROM shares WHERE resource_path = ?1 AND owner_id = ?2 AND invitee_email = ?3",
-            vec![
-                body.resource_path.clone().into(),
-                claims.sub.clone().into(),
-                body.invitee_email.to_lowercase().into(),
-            ],
-        )?;
-
-        #[derive(Debug, Deserialize)]
-        struct IdRow {
-            #[allow(dead_code)]
-            id: String,
-        }
-        if existing_cursor.next::<IdRow>().next().is_some() {
-            return ApiError::bad_request("Share already exists for this user").into_response();
-        }
-
-        // Create the share
-        self.state.storage().sql().exec(
-            "INSERT INTO shares (id, resource_path, resource_type, owner_id, owner_email, invitee_email, permission, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            vec![
-                share_id.clone().into(),
-                body.resource_path.clone().into(),
-                body.resource_type.to_string().into(),
-                claims.sub.clone().into(),
-                claims.email.clone().into(),
-                body.invitee_email.to_lowercase().into(),
-                body.permission.to_string().into(),
-                now.into(),
-            ],
-        )?;
-
-        let share = ShareInvite {
-            id: share_id,
-            resource_path: body.resource_path,
-            resource_type: body.resource_type,
-            owner_id: claims.sub,
-            owner_email: claims.email,
-            invitee_email: body.invitee_email.to_lowercase(),
-            permission: body.permission,
-            created_at: now,
-            accepted_at: None,
-            invitee_id: None,
-        };
-
-        json_ok(&ShareResponse::success(share))
-    }
-
-    /// Handle listing shares created by the user.
-    async fn handle_list_my_shares(&self, req: Request) -> Result<Response> {
-        let claims = match self.extract_claims(&req) {
-            Ok(c) => c,
-            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
-        };
-
-        let cursor = self.state.storage().sql().exec(
-            "SELECT id, resource_path, resource_type, owner_id, owner_email, invitee_email, invitee_id, permission, created_at, accepted_at FROM shares WHERE owner_id = ?1 ORDER BY created_at DESC",
-            vec![claims.sub.into()],
-        )?;
-
-        let shares = self.collect_shares(cursor)?;
-        json_ok(&ListSharesResponse::new(shares))
-    }
-
-    /// Handle listing shares where user is the invitee.
-    async fn handle_list_shared_with_me(&self, req: Request) -> Result<Response> {
-        let claims = match self.extract_claims(&req) {
-            Ok(c) => c,
-            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
-        };
-
-        // Query by invitee_id (if accepted) OR invitee_email (if pending)
-        let cursor = self.state.storage().sql().exec(
-            "SELECT id, resource_path, resource_type, owner_id, owner_email, invitee_email, invitee_id, permission, created_at, accepted_at FROM shares WHERE invitee_id = ?1 OR (invitee_email = ?2 AND invitee_id IS NULL) ORDER BY created_at DESC",
-            vec![claims.sub.into(), claims.email.to_lowercase().into()],
-        )?;
-
-        let shares = self.collect_shares(cursor)?;
-        json_ok(&ListSharesResponse::new(shares))
-    }
-
-    /// Handle getting a specific share.
-    async fn handle_get_share(&self, req: Request, share_id: &str) -> Result<Response> {
-        let claims = match self.extract_claims(&req) {
-            Ok(c) => c,
-            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
-        };
-
-        let cursor = self.state.storage().sql().exec(
-            "SELECT id, resource_path, resource_type, owner_id, owner_email, invitee_email, invitee_id, permission, created_at, accepted_at FROM shares WHERE id = ?1",
-            vec![share_id.into()],
-        )?;
-
-        let shares = self.collect_shares(cursor)?;
-        let share = match shares.into_iter().next() {
-            Some(s) => s,
-            None => return ApiError::not_found("Share not found").into_response(),
-        };
-
-        // Only owner or invitee can view
-        let is_owner = share.owner_id == claims.sub;
-        let is_invitee = share.invitee_id.as_ref() == Some(&claims.sub)
-            || share.invitee_email.to_lowercase() == claims.email.to_lowercase();
-
-        if !is_owner && !is_invitee {
-            return ApiError::forbidden("Access denied").into_response();
-        }
-
-        json_ok(&ShareResponse::success(share))
-    }
-
-    /// Handle updating a share's permission.
-    async fn handle_update_share(&self, mut req: Request, share_id: &str) -> Result<Response> {
-        let claims = match self.extract_claims(&req) {
-            Ok(c) => c,
-            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
-        };
-
-        let body: UpdateShareRequest = req.json().await?;
-
-        // Cannot update to owner permission
-        if body.permission == SharePermission::Owner {
-            return ApiError::bad_request("Cannot set owner permission").into_response();
-        }
-
-        // Check ownership
-        let cursor = self.state.storage().sql().exec(
-            "SELECT owner_id FROM shares WHERE id = ?1",
-            vec![share_id.into()],
-        )?;
-
-        #[derive(Debug, Deserialize)]
-        struct OwnerRow {
-            owner_id: String,
-        }
-        let row: Option<OwnerRow> = cursor.next::<OwnerRow>().next().transpose()?;
-
-        match row {
-            Some(r) if r.owner_id == claims.sub => {}
-            Some(_) => return ApiError::forbidden("Only owner can update share").into_response(),
-            None => return ApiError::not_found("Share not found").into_response(),
-        }
-
-        // Update the share
-        self.state.storage().sql().exec(
-            "UPDATE shares SET permission = ?1 WHERE id = ?2",
-            vec![body.permission.to_string().into(), share_id.into()],
-        )?;
-
-        // Return updated share
-        self.handle_get_share(req, share_id).await
-    }
-
-    /// Handle deleting/revoking a share.
-    async fn handle_delete_share(&self, req: Request, share_id: &str) -> Result<Response> {
-        let claims = match self.extract_claims(&req) {
-            Ok(c) => c,
-            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
-        };
-
-        // Check ownership
-        let cursor = self.state.storage().sql().exec(
-            "SELECT owner_id FROM shares WHERE id = ?1",
-            vec![share_id.into()],
-        )?;
-
-        #[derive(Debug, Deserialize)]
-        struct OwnerRow {
-            owner_id: String,
-        }
-        let row: Option<OwnerRow> = cursor.next::<OwnerRow>().next().transpose()?;
-
-        match row {
-            Some(r) if r.owner_id == claims.sub => {}
-            Some(_) => return ApiError::forbidden("Only owner can delete share").into_response(),
-            None => return ApiError::not_found("Share not found").into_response(),
-        }
-
-        // Delete the share
-        self.state.storage().sql().exec(
-            "DELETE FROM shares WHERE id = ?1",
-            vec![share_id.into()],
-        )?;
-
-        json_ok(&serde_json::json!({
-            "success": true,
-            "message": "Share deleted"
-        }))
-    }
-
-    /// Handle accepting a share invitation.
-    async fn handle_accept_share(&self, req: Request, share_id: &str) -> Result<Response> {
-        let claims = match self.extract_claims(&req) {
-            Ok(c) => c,
-            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
-        };
-
-        let now = chrono::Utc::now().timestamp();
-
-        // Check if share exists and is for this user
-        let cursor = self.state.storage().sql().exec(
-            "SELECT invitee_email, invitee_id, accepted_at FROM shares WHERE id = ?1",
-            vec![share_id.into()],
-        )?;
-
-        #[derive(Debug, Deserialize)]
-        struct InviteeRow {
-            invitee_email: String,
-            invitee_id: Option<String>,
-            accepted_at: Option<i64>,
-        }
-        let row: Option<InviteeRow> = cursor.next::<InviteeRow>().next().transpose()?;
-
-        match row {
-            Some(r) => {
-                // Check if already accepted
-                if r.accepted_at.is_some() {
-                    return ApiError::bad_request("Share already accepted").into_response();
-                }
-
-                // Check if invitee matches
-                if r.invitee_email.to_lowercase() != claims.email.to_lowercase() {
-                    return ApiError::forbidden("This share is not for you").into_response();
-                }
-            }
-            None => return ApiError::not_found("Share not found").into_response(),
-        }
-
-        // Accept the share
-        self.state.storage().sql().exec(
-            "UPDATE shares SET invitee_id = ?1, accepted_at = ?2 WHERE id = ?3",
-            vec![claims.sub.into(), now.into(), share_id.into()],
-        )?;
-
-        json_ok(&serde_json::json!({
-            "success": true,
-            "message": "Share accepted"
-        }))
-    }
-
-    /// Handle checking permission for a resource.
-    async fn handle_check_permission(&self, req: Request) -> Result<Response> {
-        let claims = match self.extract_claims(&req) {
-            Ok(c) => c,
-            Err(_) => return ApiError::unauthorized("Invalid token").into_response(),
-        };
-
-        // Get resource_path from query
-        let url = req.url()?;
-        let resource_path = url
-            .query_pairs()
-            .find(|(k, _)| k == "path")
-            .map(|(_, v)| v.to_string())
-            .unwrap_or_default();
-
-        // Get owner_id from query (the owner of the resource)
-        let owner_id = url
-            .query_pairs()
-            .find(|(k, _)| k == "owner_id")
-            .map(|(_, v)| v.to_string())
-            .unwrap_or_default();
-
-        if resource_path.is_empty() || owner_id.is_empty() {
-            return ApiError::bad_request("Missing path or owner_id parameter").into_response();
-        }
-
-        // If user is the owner, they have full access
-        if owner_id == claims.sub {
-            return json_ok(&serde_json::json!({
-                "permission": "owner",
-                "source": "owner"
-            }));
-        }
-
-        // Check for direct share
-        let cursor = self.state.storage().sql().exec(
-            "SELECT permission FROM shares WHERE resource_path = ?1 AND owner_id = ?2 AND (invitee_id = ?3 OR invitee_email = ?4) AND accepted_at IS NOT NULL",
-            vec![
-                resource_path.clone().into(),
-                owner_id.clone().into(),
-                claims.sub.clone().into(),
-                claims.email.to_lowercase().into(),
-            ],
-        )?;
-
-        #[derive(Debug, Deserialize)]
-        struct PermRow {
-            permission: String,
-        }
-        if let Some(row) = cursor.next::<PermRow>().next().transpose()? {
-            return json_ok(&serde_json::json!({
-                "permission": row.permission,
-                "source": "direct"
-            }));
-        }
-
-        // Check for inherited permission from parent folders
-        let path_parts: Vec<&str> = resource_path.split('/').collect();
-        for i in (0..path_parts.len()).rev() {
-            let parent_path = path_parts[..i].join("/");
-            if parent_path.is_empty() {
-                continue;
-            }
-
-            let cursor = self.state.storage().sql().exec(
-                "SELECT permission FROM shares WHERE resource_path = ?1 AND resource_type = 'folder' AND owner_id = ?2 AND (invitee_id = ?3 OR invitee_email = ?4) AND accepted_at IS NOT NULL",
-                vec![
-                    parent_path.into(),
-                    owner_id.clone().into(),
-                    claims.sub.clone().into(),
-                    claims.email.to_lowercase().into(),
-                ],
-            )?;
-
-            if let Some(row) = cursor.next::<PermRow>().next().transpose()? {
-                return json_ok(&serde_json::json!({
-                    "permission": row.permission,
-                    "source": "inherited"
-                }));
-            }
-        }
-
-        // No permission found
-        ApiError::forbidden("No access to this resource").into_response()
-    }
-
-    /// Helper to collect shares from SQL cursor.
-    fn collect_shares(&self, cursor: SqlCursor) -> Result<Vec<ShareInvite>> {
-        #[derive(Debug, Deserialize)]
-        struct ShareRow {
-            id: String,
-            resource_path: String,
-            resource_type: String,
-            owner_id: String,
-            owner_email: String,
-            invitee_email: String,
-            invitee_id: Option<String>,
-            permission: String,
-            created_at: i64,
-            accepted_at: Option<i64>,
-        }
-
-        let mut shares = Vec::new();
-        for row in cursor.next::<ShareRow>() {
-            let row = row?;
-            shares.push(ShareInvite {
-                id: row.id,
-                resource_path: row.resource_path,
-                resource_type: row
-                    .resource_type
-                    .parse()
-                    .unwrap_or(ResourceType::File),
-                owner_id: row.owner_id,
-                owner_email: row.owner_email,
-                invitee_email: row.invitee_email,
-                invitee_id: row.invitee_id,
-                permission: row
-                    .permission
-                    .parse()
-                    .unwrap_or(SharePermission::Viewer),
-                created_at: row.created_at,
-                accepted_at: row.accepted_at,
-            });
-        }
-        Ok(shares)
-    }
-
-    // ============================================================================
-    // File Metadata Handlers
-    // ============================================================================
 
     /// Handle listing files for a user.
     async fn handle_list_files(&self, req: Request) -> Result<Response> {
