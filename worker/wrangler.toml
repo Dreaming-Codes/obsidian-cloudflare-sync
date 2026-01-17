@@ -20,13 +20,6 @@ class_name = "SyncNotifyDurableObject"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["UserDurableObject"]
-
-[[migrations]]
-tag = "v2"
-deleted_classes = ["DocumentDurableObject"]
-
-[[migrations]]
-tag = "v3"
 new_classes = ["SyncNotifyDurableObject"]
 
 [vars]

@@ -152,6 +152,57 @@
 }
 
 /* ============================================================================
+   Sync Progress Bar
+   ============================================================================ */
+
+.cloudflare-sync-progress {
+	margin-bottom: 1em;
+	padding: 0.75em 1em;
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+}
+
+.sync-progress-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 0.5em;
+}
+
+.sync-progress-phase {
+	font-weight: var(--font-medium);
+	color: var(--text-accent);
+}
+
+.sync-progress-count {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.sync-progress-bar-container {
+	height: 8px;
+	background-color: var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	overflow: hidden;
+}
+
+.sync-progress-bar-fill {
+	height: 100%;
+	background-color: var(--interactive-accent);
+	border-radius: var(--radius-s);
+	transition: width 150ms ease;
+}
+
+.sync-progress-current-file {
+	margin-top: 0.5em;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* ============================================================================
    Notifications
    ============================================================================ */
 

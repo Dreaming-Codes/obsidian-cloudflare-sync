@@ -72,7 +72,12 @@ async fn handle_magic_link(mut req: Request, env: Env) -> Result<Response> {
         let resend = ResendClient::from_env(&env)?;
         match resend.send_magic_link(&email, &token.token).await {
             Ok(response) => {
-                if response.error.is_some() {
+                if response.is_error() {
+                    console_log!("Resend API error: {:?} ({:?})", response.message, response.name);
+                    return ApiError::internal("Failed to send email").into_response();
+                }
+                if response.id.is_none() {
+                    console_log!("Resend API returned no id and no error");
                     return ApiError::internal("Failed to send email").into_response();
                 }
             }

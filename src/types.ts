@@ -11,6 +11,25 @@ export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'er
 export type SyncStatus = 'idle' | 'syncing' | 'error' | 'offline';
 
 // ============================================================================
+// Sync Progress
+// ============================================================================
+
+export interface SyncProgress {
+	/** Whether a sync operation is currently in progress */
+	isActive: boolean;
+	/** Current phase of sync */
+	phase: 'idle' | 'listing' | 'uploading' | 'downloading' | 'complete';
+	/** Total number of files to process in current phase */
+	totalFiles: number;
+	/** Number of files processed so far */
+	processedFiles: number;
+	/** Current file being processed (if any) */
+	currentFile: string | null;
+	/** Percentage complete (0-100) */
+	percentage: number;
+}
+
+// ============================================================================
 // Authentication
 // ============================================================================
 

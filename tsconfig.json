@@ -12,9 +12,10 @@
 		"resolveJsonModule": true,
 		"noUncheckedIndexedAccess": true,
 		"lib": ["DOM", "ES2020"],
+		"jsx": "react-jsx",
 		"paths": {
 			"*": ["./src/*"]
 		}
 	},
-	"include": ["src/**/*.ts", "build.ts", "version-bump.ts"]
+	"include": ["src/**/*.ts", "src/**/*.tsx", "build.ts", "version-bump.ts"]
 }

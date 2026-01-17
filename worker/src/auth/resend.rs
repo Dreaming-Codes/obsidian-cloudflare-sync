@@ -12,12 +12,34 @@ struct ResendEmailRequest<'a> {
     html: String,
 }
 
-/// Response from Resend API.
+/// Response from Resend API - handles both success and error cases.
+/// Success: { "id": "..." }
+/// Error: { "statusCode": 403, "message": "...", "name": "..." }
 #[derive(Debug, Deserialize)]
 pub struct ResendEmailResponse {
+    /// Present on success
     pub id: Option<String>,
+    /// Present on error - the error message
     #[serde(default)]
-    pub error: Option<String>,
+    pub message: Option<String>,
+    /// Present on error - the error type name
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Present on error - the HTTP status code
+    #[serde(default, rename = "statusCode")]
+    pub status_code: Option<u16>,
+}
+
+impl ResendEmailResponse {
+    /// Check if this response indicates an error
+    pub fn is_error(&self) -> bool {
+        self.message.is_some() || self.status_code.is_some()
+    }
+
+    /// Get error message if this is an error response
+    pub fn error_message(&self) -> Option<String> {
+        self.message.clone()
+    }
 }
 
 /// Resend email client.
@@ -102,9 +124,12 @@ impl ResendClient {
         let request = Request::new_with_init("https://api.resend.com/emails", &init)?;
         let mut response = Fetch::Request(request).send().await?;
 
+        let status = response.status_code();
         let response_text = response.text().await?;
 
+        console_log!("Resend API response (status {}): {}", status, response_text);
+
         serde_json::from_str(&response_text)
-            .map_err(|e| Error::RustError(format!("Failed to parse Resend response: {}", e)))
+            .map_err(|e| Error::RustError(format!("Failed to parse Resend response '{}': {}", response_text, e)))
     }
 }

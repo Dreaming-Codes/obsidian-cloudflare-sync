@@ -1,6 +1,6 @@
 import { TFile } from 'obsidian';
 import type CloudflareSyncPlugin from '../main';
-import type { FileMeta, SyncStatus } from '../types';
+import type { FileMeta, SyncProgress, SyncStatus } from '../types';
 import { FileSync } from './FileSync';
 import { FileChange, FileWatcher } from './FileWatcher';
 import { OfflineQueue, PendingOperation } from './OfflineQueue';
@@ -19,6 +19,16 @@ interface SyncState {
 	lastSync: number | null;
 }
 
+/** Default/idle sync progress state */
+const DEFAULT_PROGRESS: SyncProgress = {
+	isActive: false,
+	phase: 'idle',
+	totalFiles: 0,
+	processedFiles: 0,
+	currentFile: null,
+	percentage: 0,
+};
+
 /**
  * Orchestrates all sync operations between local vault and remote storage
  */
@@ -32,6 +42,11 @@ export class SyncManager {
 	private isSyncing: boolean = false;
 	private syncInterval: ReturnType<typeof setInterval> | null = null;
 	private isProcessingQueue: boolean = false;
+
+	/** Current sync progress */
+	private progress: SyncProgress = { ...DEFAULT_PROGRESS };
+	/** Progress change callbacks */
+	private progressCallbacks: Array<(progress: SyncProgress) => void> = [];
 
 	/** Auto-sync interval (5 minutes) */
 	private static readonly AUTO_SYNC_INTERVAL_MS = 5 * 60 * 1000;
@@ -283,6 +298,7 @@ export class SyncManager {
 		const syncStart = Date.now();
 		this.isSyncing = true;
 		this.plugin.setSyncStatus('syncing');
+		this.updateProgress({ isActive: true, phase: 'listing', totalFiles: 0, processedFiles: 0, currentFile: null });
 
 		try {
 			// 1. Get remote file list
@@ -308,12 +324,19 @@ export class SyncManager {
 			const { toUpload, toDownload, toDelete } = await this.calculateDiff(localFiles, remoteFiles);
 			console.log(`[SyncManager] Diff calculated in ${Date.now() - t}ms: ${toUpload.length} to upload, ${toDownload.length} to download, ${toDelete.length} to delete`);
 
+			const totalOperations = toUpload.length + toDownload.length;
+			let processedCount = 0;
+
 			// 4. Process uploads
 			if (toUpload.length > 0) {
 				console.log(`[SyncManager] Uploading ${toUpload.length} files...`);
+				this.updateProgress({ phase: 'uploading', totalFiles: totalOperations, processedFiles: processedCount });
 				t = Date.now();
 				for (const file of toUpload) {
+					this.updateProgress({ currentFile: file.path, processedFiles: processedCount });
 					await this.uploadFile(file);
+					processedCount++;
+					this.updateProgress({ processedFiles: processedCount });
 				}
 				console.log(`[SyncManager] Uploads completed in ${Date.now() - t}ms`);
 			}
@@ -321,9 +344,13 @@ export class SyncManager {
 			// 5. Process downloads
 			if (toDownload.length > 0) {
 				console.log(`[SyncManager] Downloading ${toDownload.length} files...`);
+				this.updateProgress({ phase: 'downloading', totalFiles: totalOperations, processedFiles: processedCount });
 				t = Date.now();
 				for (const path of toDownload) {
+					this.updateProgress({ currentFile: path, processedFiles: processedCount });
 					await this.downloadFile(path);
+					processedCount++;
+					this.updateProgress({ processedFiles: processedCount });
 				}
 				console.log(`[SyncManager] Downloads completed in ${Date.now() - t}ms`);
 			}
@@ -336,11 +363,13 @@ export class SyncManager {
 
 			this.state.lastSync = Date.now();
 			this.plugin.setSyncStatus('idle');
+			this.updateProgress({ isActive: false, phase: 'complete', currentFile: null, processedFiles: totalOperations, percentage: 100 });
 			console.log(`[SyncManager] performFullSync() completed in ${Date.now() - syncStart}ms`);
 		} catch (error) {
 			console.error('[SyncManager] Full sync failed:', error);
 			this.plugin.setSyncStatus('error');
 			this.plugin.notificationManager.error('Sync failed');
+			this.resetProgress();
 		} finally {
 			this.isSyncing = false;
 		}
@@ -360,6 +389,7 @@ export class SyncManager {
 		const startTime = Date.now();
 		this.isSyncing = true;
 		this.plugin.setSyncStatus('syncing');
+		this.updateProgress({ isActive: true, phase: 'listing', totalFiles: 0, processedFiles: 0, currentFile: null });
 
 		try {
 			// 1. Clear remote file metadata
@@ -377,11 +407,13 @@ export class SyncManager {
 			// 3. Get all local files
 			const localFiles = this.fileWatcher.getAllSyncableFiles();
 			console.log(`[SyncManager] Uploading ${localFiles.length} local files...`);
+			this.updateProgress({ phase: 'uploading', totalFiles: localFiles.length, processedFiles: 0 });
 
 			// 4. Upload all local files
 			let uploaded = 0;
 			let failed = 0;
 			for (const file of localFiles) {
+				this.updateProgress({ currentFile: file.path, processedFiles: uploaded + failed });
 				const result = await this.fileSync.uploadFile(file);
 				if (result.success) {
 					uploaded++;
@@ -393,6 +425,7 @@ export class SyncManager {
 					failed++;
 					console.error(`[SyncManager] Failed to upload ${file.path}: ${result.error}`);
 				}
+				this.updateProgress({ processedFiles: uploaded + failed });
 
 				// Progress notification every 50 files
 				if ((uploaded + failed) % 50 === 0) {
@@ -407,6 +440,7 @@ export class SyncManager {
 			this.state.remoteFiles.clear();
 			this.state.lastSync = Date.now();
 			this.plugin.setSyncStatus('idle');
+			this.updateProgress({ isActive: false, phase: 'complete', currentFile: null, processedFiles: localFiles.length, percentage: 100 });
 
 			const duration = Date.now() - startTime;
 			console.log(`[SyncManager] forceReuploadAll() completed in ${duration}ms: ${uploaded} uploaded, ${failed} failed`);
@@ -415,6 +449,7 @@ export class SyncManager {
 			console.error('[SyncManager] Force re-upload failed:', error);
 			this.plugin.setSyncStatus('error');
 			this.plugin.notificationManager.error('Force re-upload failed');
+			this.resetProgress();
 		} finally {
 			this.isSyncing = false;
 		}
@@ -693,5 +728,60 @@ export class SyncManager {
 	 */
 	getOfflineQueue(): OfflineQueue {
 		return this.offlineQueue;
+	}
+
+	// ============================================================================
+	// Progress Tracking
+	// ============================================================================
+
+	/**
+	 * Get the current sync progress
+	 */
+	getProgress(): SyncProgress {
+		return { ...this.progress };
+	}
+
+	/**
+	 * Subscribe to progress updates
+	 * Returns unsubscribe function
+	 */
+	onProgress(callback: (progress: SyncProgress) => void): () => void {
+		this.progressCallbacks.push(callback);
+		// Immediately call with current progress
+		callback({ ...this.progress });
+		return () => {
+			const index = this.progressCallbacks.indexOf(callback);
+			if (index !== -1) {
+				this.progressCallbacks.splice(index, 1);
+			}
+		};
+	}
+
+	/**
+	 * Update progress and notify listeners
+	 */
+	private updateProgress(update: Partial<SyncProgress>): void {
+		this.progress = { ...this.progress, ...update };
+		
+		// Calculate percentage
+		if (this.progress.totalFiles > 0) {
+			this.progress.percentage = Math.round(
+				(this.progress.processedFiles / this.progress.totalFiles) * 100
+			);
+		} else {
+			this.progress.percentage = 0;
+		}
+
+		// Notify listeners
+		for (const callback of this.progressCallbacks) {
+			callback({ ...this.progress });
+		}
+	}
+
+	/**
+	 * Reset progress to idle state
+	 */
+	private resetProgress(): void {
+		this.updateProgress({ ...DEFAULT_PROGRESS });
 	}
 }
