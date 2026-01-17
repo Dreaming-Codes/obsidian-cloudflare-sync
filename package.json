@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-cloudflare-sync",
-	"version": "0.1.6",
+	"version": "0.1.7",
 	"description": "Real-time collaborative sync for Obsidian using Cloudflare infrastructure",
 	"keywords": [],
 	"license": "0-BSD",

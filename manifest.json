@@ -1,7 +1,7 @@
 {
 	"id": "cloudflare-sync",
 	"name": "Cloudflare Sync",
-	"version": "0.1.6",
+	"version": "0.1.7",
 	"minAppVersion": "1.4.0",
 	"description": "Real-time collaborative sync for Obsidian using Cloudflare infrastructure",
 	"author": "DreamingCodes",

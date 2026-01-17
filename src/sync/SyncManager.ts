@@ -327,31 +327,35 @@ export class SyncManager {
 			const totalOperations = toUpload.length + toDownload.length;
 			let processedCount = 0;
 
-			// 4. Process uploads
+			// 4. Process uploads in parallel
 			if (toUpload.length > 0) {
-				console.log(`[SyncManager] Uploading ${toUpload.length} files...`);
+				console.log(`[SyncManager] Uploading ${toUpload.length} files in parallel...`);
 				this.updateProgress({ phase: 'uploading', totalFiles: totalOperations, processedFiles: processedCount });
 				t = Date.now();
-				for (const file of toUpload) {
-					this.updateProgress({ currentFile: file.path, processedFiles: processedCount });
-					await this.uploadFile(file);
-					processedCount++;
-					this.updateProgress({ processedFiles: processedCount });
-				}
+				
+				await Promise.all(
+					toUpload.map(async (file) => {
+						await this.uploadFile(file);
+						processedCount++;
+						this.updateProgress({ processedFiles: processedCount, currentFile: file.path });
+					})
+				);
 				console.log(`[SyncManager] Uploads completed in ${Date.now() - t}ms`);
 			}
 
-			// 5. Process downloads
+			// 5. Process downloads in parallel
 			if (toDownload.length > 0) {
-				console.log(`[SyncManager] Downloading ${toDownload.length} files...`);
+				console.log(`[SyncManager] Downloading ${toDownload.length} files in parallel...`);
 				this.updateProgress({ phase: 'downloading', totalFiles: totalOperations, processedFiles: processedCount });
 				t = Date.now();
-				for (const path of toDownload) {
-					this.updateProgress({ currentFile: path, processedFiles: processedCount });
-					await this.downloadFile(path);
-					processedCount++;
-					this.updateProgress({ processedFiles: processedCount });
-				}
+				
+				await Promise.all(
+					toDownload.map(async (path) => {
+						await this.downloadFile(path);
+						processedCount++;
+						this.updateProgress({ processedFiles: processedCount, currentFile: path });
+					})
+				);
 				console.log(`[SyncManager] Downloads completed in ${Date.now() - t}ms`);
 			}
 
@@ -409,11 +413,12 @@ export class SyncManager {
 			console.log(`[SyncManager] Uploading ${localFiles.length} local files...`);
 			this.updateProgress({ phase: 'uploading', totalFiles: localFiles.length, processedFiles: 0 });
 
-			// 4. Upload all local files
-			let uploaded = 0;
-			let failed = 0;
-			for (const file of localFiles) {
-				this.updateProgress({ currentFile: file.path, processedFiles: uploaded + failed });
+		// 4. Upload all local files in parallel
+		let uploaded = 0;
+		let failed = 0;
+		
+		await Promise.all(
+			localFiles.map(async (file) => {
 				const result = await this.fileSync.uploadFile(file);
 				if (result.success) {
 					uploaded++;
@@ -425,13 +430,9 @@ export class SyncManager {
 					failed++;
 					console.error(`[SyncManager] Failed to upload ${file.path}: ${result.error}`);
 				}
-				this.updateProgress({ processedFiles: uploaded + failed });
-
-				// Progress notification every 50 files
-				if ((uploaded + failed) % 50 === 0) {
-					console.log(`[SyncManager] Progress: ${uploaded + failed}/${localFiles.length} files`);
-				}
-			}
+				this.updateProgress({ processedFiles: uploaded + failed, currentFile: file.path });
+			})
+		);
 
 			// Save base hashes
 			await this.plugin.saveSettings();
