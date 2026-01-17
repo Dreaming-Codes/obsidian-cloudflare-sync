@@ -1,6 +1,9 @@
 /**
  * WebSocket Client for real-time sync with the Cloudflare worker.
  * Handles connection, reconnection, and message routing.
+ * 
+ * Each WebSocket connection is tied to a specific document (doc_id).
+ * When switching documents, the client disconnects and reconnects.
  */
 
 import { ClientMessage, ServerMessage, ConnectionStatus } from '../types';
@@ -22,7 +25,7 @@ export class WebSocketClient {
 	private reconnectAttempts = 0;
 	private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 	private pingTimeout: ReturnType<typeof setInterval> | null = null;
-	private subscribedDocs: Set<string> = new Set();
+	private currentDocId: string | null = null;
 	private pendingMessages: ClientMessage[] = [];
 	private destroyed = false;
 
@@ -36,12 +39,23 @@ export class WebSocketClient {
 	}
 
 	/**
-	 * Connect to the WebSocket server.
+	 * Connect to the WebSocket server for a specific document.
+	 * If already connected to a different document, will disconnect first.
 	 */
-	async connect(): Promise<void> {
+	async connect(docId: string): Promise<void> {
 		if (this.destroyed) return;
-		if (this.ws?.readyState === WebSocket.OPEN) return;
 
+		// If already connected to this document, do nothing
+		if (this.currentDocId === docId && this.ws?.readyState === WebSocket.OPEN) {
+			return;
+		}
+
+		// Disconnect from current document if different
+		if (this.currentDocId && this.currentDocId !== docId) {
+			this.disconnectInternal();
+		}
+
+		this.currentDocId = docId;
 		this.setStatus('connecting');
 
 		const token = await this.config.getToken();
@@ -51,13 +65,15 @@ export class WebSocketClient {
 			return;
 		}
 
-		// Build WebSocket URL
+		// Build WebSocket URL with doc_id
 		const wsUrl = this.config.serverUrl
 			.replace(/^https?:\/\//, 'wss://')
 			.replace(/\/$/, '');
 
 		try {
-			this.ws = new WebSocket(`${wsUrl}/ws?token=${encodeURIComponent(token)}`);
+			const url = `${wsUrl}/ws?token=${encodeURIComponent(token)}&doc=${encodeURIComponent(docId)}`;
+			console.log('[WebSocketClient] Connecting to:', url.replace(/token=[^&]+/, 'token=***'));
+			this.ws = new WebSocket(url);
 			this.setupEventHandlers();
 		} catch (error) {
 			console.error('[WebSocketClient] Failed to create WebSocket:', error);
@@ -70,6 +86,14 @@ export class WebSocketClient {
 	 * Disconnect from the WebSocket server.
 	 */
 	disconnect(): void {
+		this.currentDocId = null;
+		this.disconnectInternal();
+	}
+
+	/**
+	 * Internal disconnect without clearing currentDocId (for reconnection).
+	 */
+	private disconnectInternal(): void {
 		this.clearTimers();
 
 		if (this.ws) {
@@ -78,7 +102,6 @@ export class WebSocketClient {
 			this.ws = null;
 		}
 
-		this.subscribedDocs.clear();
 		this.setStatus('disconnected');
 	}
 
@@ -103,10 +126,14 @@ export class WebSocketClient {
 	}
 
 	/**
-	 * Subscribe to a document for real-time updates.
+	 * Subscribe to the current document for real-time updates.
+	 * Note: The connection is already to a specific document, so this
+	 * just sends the subscribe message to the DocumentDO.
 	 */
 	subscribe(docId: string): void {
-		this.subscribedDocs.add(docId);
+		if (docId !== this.currentDocId) {
+			console.warn('[WebSocketClient] subscribe called with different docId than connected');
+		}
 		this.send({ type: 'subscribe', doc_id: docId });
 	}
 
@@ -114,7 +141,6 @@ export class WebSocketClient {
 	 * Unsubscribe from a document.
 	 */
 	unsubscribe(docId: string): void {
-		this.subscribedDocs.delete(docId);
 		this.send({ type: 'unsubscribe', doc_id: docId });
 	}
 
@@ -176,20 +202,22 @@ export class WebSocketClient {
 		return this.status === 'connected' && this.ws?.readyState === WebSocket.OPEN;
 	}
 
+	/**
+	 * Get the current document ID.
+	 */
+	getCurrentDocId(): string | null {
+		return this.currentDocId;
+	}
+
 	// ========== Private Methods ==========
 
 	private setupEventHandlers(): void {
 		if (!this.ws) return;
 
 		this.ws.onopen = () => {
-			console.log('[WebSocketClient] Connected');
+			console.log('[WebSocketClient] Connected to doc:', this.currentDocId);
 			this.setStatus('connected');
 			this.reconnectAttempts = 0;
-
-			// Resubscribe to all documents
-			for (const docId of this.subscribedDocs) {
-				this.send({ type: 'subscribe', doc_id: docId });
-			}
 
 			// Send pending messages
 			while (this.pendingMessages.length > 0) {
@@ -215,7 +243,7 @@ export class WebSocketClient {
 			this.ws = null;
 			this.clearTimers();
 
-			if (!this.destroyed) {
+			if (!this.destroyed && this.currentDocId) {
 				this.setStatus('disconnected');
 				this.scheduleReconnect();
 			}
@@ -246,7 +274,7 @@ export class WebSocketClient {
 	}
 
 	private scheduleReconnect(): void {
-		if (this.destroyed || this.reconnectTimeout) return;
+		if (this.destroyed || this.reconnectTimeout || !this.currentDocId) return;
 
 		const delay = Math.min(
 			this.config.reconnectDelay * Math.pow(2, this.reconnectAttempts),
@@ -258,7 +286,9 @@ export class WebSocketClient {
 		this.reconnectTimeout = setTimeout(() => {
 			this.reconnectTimeout = null;
 			this.reconnectAttempts++;
-			this.connect();
+			if (this.currentDocId) {
+				this.connect(this.currentDocId);
+			}
 		}, delay);
 	}
 

@@ -73,10 +73,7 @@ export class RealtimeSyncManager extends Events {
 		if (this.enabled) return;
 		this.enabled = true;
 
-		// Connect WebSocket
-		await this.wsClient.connect();
-
-		// Subscribe to active file if any
+		// Subscribe to active file if any (this will connect the WebSocket)
 		const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (activeView?.file) {
 			await this.subscribeToFile(activeView.file);
@@ -143,11 +140,6 @@ export class RealtimeSyncManager extends Events {
 			return;
 		}
 
-		// Unsubscribe from previous file
-		if (this.activeDocId) {
-			this.wsClient.unsubscribe(this.activeDocId);
-		}
-
 		this.activeFile = file;
 		this.activeDocId = await getDocId(userId, file.path);
 
@@ -161,6 +153,9 @@ export class RealtimeSyncManager extends Events {
 		if (crdtDoc.getContent() === '') {
 			crdtDoc.setContent(content);
 		}
+
+		// Connect to WebSocket for this document (will disconnect from previous if any)
+		await this.wsClient.connect(this.activeDocId);
 
 		// Subscribe via WebSocket
 		this.wsClient.subscribe(this.activeDocId);
@@ -178,17 +173,15 @@ export class RealtimeSyncManager extends Events {
 	async subscribeToSharedFile(ownerId: string, resourcePath: string): Promise<void> {
 		if (!this.enabled) return;
 
-		// Unsubscribe from previous file
-		if (this.activeDocId) {
-			this.wsClient.unsubscribe(this.activeDocId);
-		}
-
 		// Clear active file since this is a remote file
 		this.activeFile = null;
 		this.activeDocId = await getDocId(ownerId, resourcePath);
 
 		// Get or create CRDT document (starts empty, will sync from server)
 		const crdtDoc = this.crdtManager.getOrCreate(this.activeDocId);
+
+		// Connect to WebSocket for this document (will disconnect from previous if any)
+		await this.wsClient.connect(this.activeDocId);
 
 		// Subscribe via WebSocket
 		this.wsClient.subscribe(this.activeDocId);
