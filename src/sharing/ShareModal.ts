@@ -471,15 +471,16 @@ export class SharedWithMeModal extends Modal {
 	private async downloadSharedFile(share: ShareInvite): Promise<boolean> {
 		try {
 			// Fetch the shared file from the server
-			const response = await fetch(
-				`${this.plugin.settings.serverUrl}/shared-files/${share.ownerId}/${encodeURIComponent(share.resourcePath)}`,
-				{
-					headers: this.plugin.authManager.getAuthHeader(),
-				}
-			);
+			const url = `${this.plugin.settings.serverUrl}/shared-files/${share.ownerId}/${encodeURIComponent(share.resourcePath)}`;
+			console.log('Downloading shared file:', { url, share });
+			
+			const response = await fetch(url, {
+				headers: this.plugin.authManager.getAuthHeader(),
+			});
 
 			if (!response.ok) {
-				console.error('Failed to download shared file:', response.status);
+				const errorText = await response.text();
+				console.error('Failed to download shared file:', response.status, errorText);
 				return false;
 			}
 

@@ -129,14 +129,15 @@ async fn route(req: Request, env: Env) -> Result<Response> {
             handle_comment_routes(req, &env).await
         }
 
+        // Shared files download (for accessing files shared by others)
+        // NOTE: Must be before /share routes since /shared-files starts with /share
+        (Method::Get, p) if p.starts_with("/shared-files/") => {
+            routes::handle_shared_file_download(req, &env, &path).await
+        }
+
         // Share routes
         (_, p) if p.starts_with("/share") || p == "/shares" || p == "/shared-with-me" || p == "/permissions" => {
             handle_share_routes(req, &env).await
-        }
-
-        // Shared files download (for accessing files shared by others)
-        (Method::Get, p) if p.starts_with("/shared-files/") => {
-            routes::handle_shared_file_download(req, &env, &path).await
         }
 
         // WebSocket endpoint for real-time sync
