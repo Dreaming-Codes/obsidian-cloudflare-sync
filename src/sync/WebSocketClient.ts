@@ -118,8 +118,10 @@ export class WebSocketClient {
 	 */
 	send(message: ClientMessage): void {
 		if (this.ws?.readyState === WebSocket.OPEN) {
+			console.log('[WebSocketClient] Sending message:', message.type);
 			this.ws.send(JSON.stringify(message));
 		} else {
+			console.log('[WebSocketClient] Queueing message (WS not open):', message.type);
 			// Queue message for when connected
 			this.pendingMessages.push(message);
 		}
@@ -231,6 +233,7 @@ export class WebSocketClient {
 
 		this.ws.onmessage = (event) => {
 			try {
+				console.log('[WebSocketClient] Raw message received:', event.data.substring(0, 200));
 				const message = JSON.parse(event.data) as ServerMessage;
 				this.handleMessage(message);
 			} catch (error) {
@@ -256,6 +259,7 @@ export class WebSocketClient {
 	}
 
 	private handleMessage(message: ServerMessage): void {
+		console.log('[WebSocketClient] Received message:', message.type);
 		// Handle pong internally
 		if (message.type === 'pong') {
 			// Could track latency here

@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use worker::*;
-use yrs::{updates::decoder::Decode, updates::encoder::Encode, Doc, ReadTxn, StateVector, Transact, Update};
+use yrs::{updates::decoder::Decode, updates::encoder::Encode, Doc, GetString, ReadTxn, StateVector, Text, Transact, Update, WriteTxn};
 
 use crate::auth::JwtManager;
 use crate::sync::{ClientMessage, ServerMessage};
@@ -314,15 +314,20 @@ impl DurableObject for DocumentDurableObject {
             }
         };
 
+        console_log!("Received WebSocket message: {}", &text[..text.len().min(200)]);
+
         // Parse the message
         let client_msg: ClientMessage = match serde_json::from_str(&text) {
             Ok(m) => m,
             Err(e) => {
+                console_log!("Failed to parse message: {}", e);
                 let error = ServerMessage::invalid_message(&format!("Invalid JSON: {}", e));
                 let _ = ws.send_with_str(&serde_json::to_string(&error).unwrap_or_default());
                 return Ok(());
             }
         };
+
+        console_log!("Parsed message type: {:?}", client_msg);
 
         // Handle the message
         self.handle_client_message(&ws, client_msg).await
@@ -403,15 +408,42 @@ impl DocumentDurableObject {
             ],
         );
 
-        // Broadcast that user joined
+        // Send the user_joined message to the newly connected client as well
         let join_msg = ServerMessage::UserJoined {
             doc_id: doc_id.clone(),
             user_id: user_id.clone(),
             email: email.clone(),
         };
+        // Send to the new connection (so they know they're connected)
+        let _ = server.send_with_str(&serde_json::to_string(&join_msg).unwrap_or_default());
+        
+        // Also broadcast to other connections
         self.broadcast_except(&server, &join_msg).await?;
 
         console_log!("User {} ({}) connected to doc {}", email, user_id, doc_id);
+        
+        // Send an immediate sync_step2 with current state to the new connection
+        // This handles the case where websocket_message might not be triggered
+        console_log!("Sending initial sync_step2 on connect for doc_id: {}", doc_id);
+        let mut state = self.get_document_state()?;
+        console_log!("Initial state size: {} bytes", state.len());
+        
+        if self.is_empty_crdt_state(&state) {
+            console_log!("CRDT state is empty, attempting R2 initialization");
+            if let Some(content) = self.fetch_initial_content_from_r2(&doc_id).await? {
+                console_log!("Fetched {} bytes from R2", content.len());
+                state = self.initialize_crdt_from_content(&content)?;
+                console_log!("Initialized CRDT with {} bytes", state.len());
+            }
+        }
+        
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let sync_response = ServerMessage::SyncStep2 {
+            doc_id: doc_id.clone(),
+            update: STANDARD.encode(&state),
+        };
+        let _ = server.send_with_str(&serde_json::to_string(&sync_response).unwrap_or_default());
+        console_log!("Sent initial sync_step2 to new connection");
 
         // Return the client WebSocket
         Response::from_websocket(client)
@@ -419,7 +451,7 @@ impl DocumentDurableObject {
 
     /// Get a tag value from a WebSocket.
     fn get_ws_tag(&self, ws: &WebSocket, prefix: &str) -> Option<String> {
-        let tags = ws.deserialize_attachment::<Vec<String>>().ok()??;
+        let tags = self.state.get_tags(ws);
         for tag in tags {
             if let Some(value) = tag.strip_prefix(&format!("{}:", prefix)) {
                 return Some(value.to_string());
@@ -463,8 +495,26 @@ impl DocumentDurableObject {
 
         match msg {
             ClientMessage::Subscribe { doc_id } => {
-                // Send current document state
-                let state = self.get_document_state()?;
+                console_log!("Processing Subscribe for doc_id: {}", doc_id);
+                // Check if we have existing CRDT state
+                let mut state = self.get_document_state()?;
+                console_log!("Current CRDT state size: {} bytes", state.len());
+                
+                // If state is empty, try to initialize from R2
+                if self.is_empty_crdt_state(&state) {
+                    console_log!("CRDT state is empty for doc_id: {}, attempting R2 initialization", doc_id);
+                    
+                    if let Some(content) = self.fetch_initial_content_from_r2(&doc_id).await? {
+                        console_log!("Fetched {} bytes from R2 for doc_id: {}", content.len(), doc_id);
+                        
+                        // Initialize CRDT with the content
+                        state = self.initialize_crdt_from_content(&content)?;
+                        
+                        console_log!("Initialized CRDT state ({} bytes) for doc_id: {}", state.len(), doc_id);
+                    } else {
+                        console_log!("No R2 content found for doc_id: {}", doc_id);
+                    }
+                }
                 
                 use base64::{engine::general_purpose::STANDARD, Engine};
                 
@@ -472,9 +522,11 @@ impl DocumentDurableObject {
                     doc_id: doc_id.clone(),
                     update: STANDARD.encode(&state),
                 };
+                console_log!("Sending SyncStep2 response");
                 let _ = ws.send_with_str(&serde_json::to_string(&response).unwrap_or_default());
 
                 let subscribed = ServerMessage::Subscribed { doc_id };
+                console_log!("Sending Subscribed response");
                 let _ = ws.send_with_str(&serde_json::to_string(&subscribed).unwrap_or_default());
             }
 
@@ -548,22 +600,35 @@ impl DocumentDurableObject {
 
     /// Get the current document state as an update.
     fn get_document_state(&self) -> Result<Vec<u8>> {
-        #[derive(Debug, Deserialize)]
-        struct StateRow {
-            yrs_state: Option<Vec<u8>>,
-        }
-
+        use worker::SqlStorageValue;
+        
         let cursor = self.state.storage().sql().exec(
             "SELECT yrs_state FROM doc_state WHERE id = 1",
             None,
         )?;
 
-        let row: Option<StateRow> = cursor.next::<StateRow>().next().transpose()?;
-
-        match row {
-            Some(r) => Ok(r.yrs_state.unwrap_or_default()),
+        // Use raw() to properly handle BLOB data
+        let mut raw_iter = cursor.raw();
+        match raw_iter.next() {
+            Some(Ok(values)) => {
+                // First column is yrs_state
+                if let Some(SqlStorageValue::Blob(bytes)) = values.first() {
+                    Ok(bytes.clone())
+                } else if let Some(SqlStorageValue::Null) = values.first() {
+                    // Return empty document state
+                    let doc = Doc::new();
+                    let txn = doc.transact();
+                    Ok(txn.encode_state_as_update_v1(&StateVector::default()))
+                } else {
+                    // Return empty document state
+                    let doc = Doc::new();
+                    let txn = doc.transact();
+                    Ok(txn.encode_state_as_update_v1(&StateVector::default()))
+                }
+            }
+            Some(Err(e)) => Err(e),
             None => {
-                // Return empty document state
+                // No row found - return empty document state
                 let doc = Doc::new();
                 let txn = doc.transact();
                 Ok(txn.encode_state_as_update_v1(&StateVector::default()))
@@ -634,6 +699,104 @@ impl DocumentDurableObject {
         Ok(())
     }
 
+    // ==================== R2 Initialization ====================
+
+    /// Check if the CRDT state represents an empty document.
+    fn is_empty_crdt_state(&self, state: &[u8]) -> bool {
+        if state.is_empty() {
+            return true;
+        }
+        
+        // Try to decode and check if the document has any content
+        let doc = Doc::new();
+        {
+            let mut txn = doc.transact_mut();
+            if let Ok(update) = Update::decode_v1(state) {
+                let _ = txn.apply_update(update);
+            }
+        }
+        
+        // Use a mutable transaction to get_or_insert_text, then check content
+        let mut txn = doc.transact_mut();
+        let text = txn.get_or_insert_text("content");
+        text.get_string(&txn).is_empty()
+    }
+
+    /// Fetch initial file content from R2 storage.
+    /// The doc_id format is: {owner_id}:{path_hash}
+    async fn fetch_initial_content_from_r2(&self, doc_id: &str) -> Result<Option<String>> {
+        // Parse doc_id: {owner_id}:{path_hash}
+        let parts: Vec<&str> = doc_id.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            console_log!("Invalid doc_id format: {}", doc_id);
+            return Ok(None);
+        }
+        
+        let owner_id = parts[0];
+        let path_hash = parts[1];
+        
+        // Construct R2 key: {owner_id}/files/{path_hash}/content
+        let r2_key = format!("{}/files/{}/content", owner_id, path_hash);
+        
+        console_log!("Fetching from R2 key: {}", r2_key);
+        
+        // Get R2 bucket
+        let bucket = self.env.bucket("VAULT_STORAGE")?;
+        
+        // Fetch content
+        match bucket.get(&r2_key).execute().await? {
+            Some(obj) => {
+                match obj.body() {
+                    Some(body) => {
+                        let bytes = body.bytes().await?;
+                        // Convert to UTF-8 string (markdown content)
+                        match String::from_utf8(bytes.to_vec()) {
+                            Ok(content) => Ok(Some(content)),
+                            Err(e) => {
+                                console_log!("Failed to parse R2 content as UTF-8: {}", e);
+                                Ok(None)
+                            }
+                        }
+                    }
+                    None => {
+                        // Empty file
+                        Ok(Some(String::new()))
+                    }
+                }
+            }
+            None => {
+                console_log!("R2 object not found: {}", r2_key);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Initialize CRDT document with text content and save to database.
+    fn initialize_crdt_from_content(&self, content: &str) -> Result<Vec<u8>> {
+        let doc = Doc::new();
+        
+        // Set the content in the CRDT
+        {
+            let mut txn = doc.transact_mut();
+            let text = txn.get_or_insert_text("content");
+            text.insert(&mut txn, 0, content);
+        }
+        
+        // Encode the state
+        let txn = doc.transact();
+        let state = txn.encode_state_as_update_v1(&StateVector::default());
+        let now = chrono::Utc::now().timestamp();
+        
+        // Save to database
+        self.state.storage().sql().exec(
+            "INSERT INTO doc_state (id, yrs_state, updated_at) VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET yrs_state = ?1, updated_at = ?2",
+            vec![state.clone().into(), now.into()],
+        )?;
+        
+        Ok(state)
+    }
+
     // ==================== REST API Handlers ====================
 
     /// Get the JWT manager from environment.
@@ -684,22 +847,28 @@ impl DocumentDurableObject {
 
     /// Get the current document state.
     async fn handle_get_state(&self) -> Result<Response> {
-        #[derive(Debug, Deserialize)]
-        struct StateRow {
-            yrs_state: Option<Vec<u8>>,
-            updated_at: i64,
-        }
-
+        use worker::SqlStorageValue;
+        
         let cursor = self.state.storage().sql().exec(
             "SELECT yrs_state, updated_at FROM doc_state WHERE id = 1",
             None,
         )?;
 
-        let row: Option<StateRow> = cursor.next::<StateRow>().next().transpose()?;
-
-        let (state_vector, update, updated_at) = match row {
-            Some(r) => {
-                if let Some(state_bytes) = r.yrs_state {
+        // Use raw() to properly handle BLOB data
+        let mut raw_iter = cursor.raw();
+        let (state_vector, update, updated_at) = match raw_iter.next() {
+            Some(Ok(values)) => {
+                // First column is yrs_state, second is updated_at
+                let state_bytes = match values.first() {
+                    Some(SqlStorageValue::Blob(bytes)) => Some(bytes.clone()),
+                    _ => None,
+                };
+                let updated_at = match values.get(1) {
+                    Some(SqlStorageValue::Integer(ts)) => *ts,
+                    _ => chrono::Utc::now().timestamp(),
+                };
+                
+                if let Some(state_bytes) = state_bytes {
                     // Load the document from stored state
                     let doc = Doc::new();
                     {
@@ -713,7 +882,7 @@ impl DocumentDurableObject {
                     let sv = txn.state_vector().encode_v1();
                     let update = txn.encode_state_as_update_v1(&StateVector::default());
 
-                    (sv, update, r.updated_at)
+                    (sv, update, updated_at)
                 } else {
                     // Empty document
                     let doc = Doc::new();
@@ -721,9 +890,10 @@ impl DocumentDurableObject {
                     let sv = txn.state_vector().encode_v1();
                     let update = txn.encode_state_as_update_v1(&StateVector::default());
 
-                    (sv, update, r.updated_at)
+                    (sv, update, updated_at)
                 }
             }
+            Some(Err(e)) => return Err(e),
             None => {
                 // No state yet, create empty document
                 let doc = Doc::new();
@@ -747,6 +917,8 @@ impl DocumentDurableObject {
 
     /// Apply an update to the document.
     async fn handle_apply_update(&self, mut req: Request) -> Result<Response> {
+        use worker::SqlStorageValue;
+        
         #[derive(Debug, Deserialize)]
         struct ApplyUpdateRequest {
             update: String, // Base64 encoded
@@ -759,28 +931,30 @@ impl DocumentDurableObject {
             .decode(&body.update)
             .map_err(|e| Error::RustError(format!("Invalid base64: {}", e)))?;
 
-        // Load existing state
-        #[derive(Debug, Deserialize)]
-        struct StateRow {
-            yrs_state: Option<Vec<u8>>,
-        }
-
+        // Load existing state using raw() to handle BLOB data
         let cursor = self.state.storage().sql().exec(
             "SELECT yrs_state FROM doc_state WHERE id = 1",
             None,
         )?;
 
-        let row: Option<StateRow> = cursor.next::<StateRow>().next().transpose()?;
+        let mut raw_iter = cursor.raw();
+        let existing_state = match raw_iter.next() {
+            Some(Ok(values)) => {
+                match values.first() {
+                    Some(SqlStorageValue::Blob(bytes)) => Some(bytes.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
 
         let doc = Doc::new();
 
         // Apply existing state if any
-        if let Some(r) = row {
-            if let Some(state_bytes) = r.yrs_state {
-                let mut txn = doc.transact_mut();
-                if let Ok(update) = Update::decode_v1(&state_bytes) {
-                    let _ = txn.apply_update(update);
-                }
+        if let Some(state_bytes) = existing_state {
+            let mut txn = doc.transact_mut();
+            if let Ok(update) = Update::decode_v1(&state_bytes) {
+                let _ = txn.apply_update(update);
             }
         }
 

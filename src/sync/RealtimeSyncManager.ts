@@ -3,9 +3,10 @@
  * Handles bidirectional sync between the editor and remote collaborators.
  */
 
-import { App, Editor, MarkdownView, TFile, Events } from 'obsidian';
+import { App, Editor, MarkdownView, TFile, Events, debounce } from 'obsidian';
 import { WebSocketClient, decodeBase64 } from './WebSocketClient';
 import { CRDTDocument, CRDTDocumentManager } from './CRDTDocument';
+import { SharedFileCacheManager, generateDocId } from './SharedFileCacheManager';
 import type { ServerMessage, ConnectionStatus } from '../types';
 
 export interface RealtimeSyncManagerConfig {
@@ -13,23 +14,27 @@ export interface RealtimeSyncManagerConfig {
 	serverUrl: string;
 	getToken: () => Promise<string | null>;
 	getUserId: () => string | null;
+	getCacheManager: () => SharedFileCacheManager | null;
 	onStatusChange?: (status: ConnectionStatus) => void;
 	onCollaboratorJoin?: (docId: string, userId: string, email: string) => void;
 	onCollaboratorLeave?: (docId: string, userId: string) => void;
 }
 
 /**
- * Generates a document ID from an owner ID and file path.
- * Format: {owner_id}:{path_hash}
- * This ensures files are globally unique across users.
+ * Information about an active document subscription.
  */
-async function getDocId(ownerId: string, path: string): Promise<string> {
-	const encoder = new TextEncoder();
-	const data = encoder.encode(path);
-	const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-	const hashArray = Array.from(new Uint8Array(hashBuffer));
-	const pathHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-	return `${ownerId}:${pathHash}`;
+interface ActiveDocument {
+	docId: string;
+	/** The file being edited (owner's file or cache file) */
+	file: TFile | null;
+	/** Owner's user ID */
+	ownerId: string;
+	/** Original resource path */
+	resourcePath: string;
+	/** Whether this is a shared file (not owned by current user) */
+	isShared: boolean;
+	/** Last known content to detect changes */
+	lastContent: string;
 }
 
 export class RealtimeSyncManager extends Events {
@@ -37,10 +42,9 @@ export class RealtimeSyncManager extends Events {
 	private wsClient: WebSocketClient;
 	private crdtManager: CRDTDocumentManager;
 	private config: RealtimeSyncManagerConfig;
-	private activeFile: TFile | null = null;
-	private activeDocId: string | null = null;
-	private editorUpdateHandler: ((editor: Editor) => void) | null = null;
+	private activeDoc: ActiveDocument | null = null;
 	private isUpdatingEditor = false;
+	private isUpdatingFromEditor = false;
 	private enabled = false;
 
 	constructor(config: RealtimeSyncManagerConfig) {
@@ -72,15 +76,6 @@ export class RealtimeSyncManager extends Events {
 	async enable(): Promise<void> {
 		if (this.enabled) return;
 		this.enabled = true;
-
-		// Subscribe to active file if any (this will connect the WebSocket)
-		const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (activeView?.file) {
-			await this.subscribeToFile(activeView.file);
-		}
-
-		// Listen for file open events
-		this.registerFileOpenHandler();
 	}
 
 	/**
@@ -93,14 +88,13 @@ export class RealtimeSyncManager extends Events {
 		// Disconnect WebSocket
 		this.wsClient.disconnect();
 
-		// Unsubscribe from current file
-		if (this.activeDocId) {
-			this.wsClient.unsubscribe(this.activeDocId);
+		// Unsubscribe from current document
+		if (this.activeDoc) {
+			this.wsClient.unsubscribe(this.activeDoc.docId);
 		}
 
 		// Clear state
-		this.activeFile = null;
-		this.activeDocId = null;
+		this.activeDoc = null;
 		this.crdtManager.destroyAll();
 	}
 
@@ -127,6 +121,13 @@ export class RealtimeSyncManager extends Events {
 	}
 
 	/**
+	 * Get the active document ID.
+	 */
+	getActiveDocId(): string | null {
+		return this.activeDoc?.docId ?? null;
+	}
+
+	/**
 	 * Subscribe to a file for real-time sync.
 	 * This subscribes to the current user's own file.
 	 */
@@ -140,30 +141,64 @@ export class RealtimeSyncManager extends Events {
 			return;
 		}
 
-		this.activeFile = file;
-		this.activeDocId = await getDocId(userId, file.path);
+		// Check if this is a shared cache file
+		const cacheManager = this.config.getCacheManager();
+		if (cacheManager?.isCacheFile(file.path)) {
+			// This is a shared cache file - it's already subscribed via subscribeToSharedFile
+			const cached = cacheManager.getCachedFileByPath(file.path);
+			if (cached && this.activeDoc?.docId === cached.docId) {
+				console.log(`[RealtimeSyncManager] Already subscribed to shared file: ${file.path}`);
+				return;
+			}
+			// If it's a different cached file, we need to look up the share info
+			// For now, just skip to avoid issues
+			console.log(`[RealtimeSyncManager] Cache file opened but no active subscription: ${file.path}`);
+			return;
+		}
 
-		// Get or create CRDT document
-		const crdtDoc = this.crdtManager.getOrCreate(this.activeDocId);
+		const docId = await generateDocId(userId, file.path);
+
+		// If already subscribed to this doc, don't resubscribe
+		if (this.activeDoc?.docId === docId) {
+			return;
+		}
+
+		// Unsubscribe from previous document
+		if (this.activeDoc) {
+			this.wsClient.unsubscribe(this.activeDoc.docId);
+		}
 
 		// Read current file content
 		const content = await this.app.vault.read(file);
+
+		// Get or create CRDT document
+		const crdtDoc = this.crdtManager.getOrCreate(docId);
 
 		// Initialize CRDT with current content if empty
 		if (crdtDoc.getContent() === '') {
 			crdtDoc.setContent(content);
 		}
 
-		// Connect to WebSocket for this document (will disconnect from previous if any)
-		await this.wsClient.connect(this.activeDocId);
+		// Set up active document
+		this.activeDoc = {
+			docId,
+			file,
+			ownerId: userId,
+			resourcePath: file.path,
+			isShared: false,
+			lastContent: content,
+		};
+
+		// Connect to WebSocket for this document
+		await this.wsClient.connect(docId);
 
 		// Subscribe via WebSocket
-		this.wsClient.subscribe(this.activeDocId);
+		this.wsClient.subscribe(docId);
 
 		// Send our state vector to get missing updates
-		this.wsClient.sendSyncStep1(this.activeDocId, crdtDoc.getStateVector());
+		this.wsClient.sendSyncStep1(docId, crdtDoc.getStateVector());
 
-		console.log(`[RealtimeSyncManager] Subscribed to ${file.path} (${this.activeDocId})`);
+		console.log(`[RealtimeSyncManager] Subscribed to own file ${file.path} (${docId})`);
 	}
 
 	/**
@@ -171,75 +206,157 @@ export class RealtimeSyncManager extends Events {
 	 * This connects to another user's document.
 	 */
 	async subscribeToSharedFile(ownerId: string, resourcePath: string): Promise<void> {
+		console.log(`[RealtimeSyncManager] subscribeToSharedFile: owner=${ownerId}, path=${resourcePath}`);
 		if (!this.enabled) return;
 
-		// Clear active file since this is a remote file
-		this.activeFile = null;
-		this.activeDocId = await getDocId(ownerId, resourcePath);
+		const docId = await generateDocId(ownerId, resourcePath);
+		console.log(`[RealtimeSyncManager] Generated docId: ${docId}`);
+
+		// If already subscribed to this doc, don't resubscribe
+		if (this.activeDoc?.docId === docId) {
+			console.log(`[RealtimeSyncManager] Already subscribed to this doc`);
+			return;
+		}
+
+		// Unsubscribe from previous document
+		if (this.activeDoc) {
+			this.wsClient.unsubscribe(this.activeDoc.docId);
+		}
 
 		// Get or create CRDT document (starts empty, will sync from server)
-		const crdtDoc = this.crdtManager.getOrCreate(this.activeDocId);
+		const crdtDoc = this.crdtManager.getOrCreate(docId);
 
-		// Connect to WebSocket for this document (will disconnect from previous if any)
-		await this.wsClient.connect(this.activeDocId);
+		// Set up active document (file will be set later when cache is created)
+		this.activeDoc = {
+			docId,
+			file: null,
+			ownerId,
+			resourcePath,
+			isShared: true,
+			lastContent: '',
+		};
+
+		// Connect to WebSocket for this document
+		console.log(`[RealtimeSyncManager] Connecting WebSocket...`);
+		await this.wsClient.connect(docId);
+		console.log(`[RealtimeSyncManager] WebSocket connected`);
 
 		// Subscribe via WebSocket
-		this.wsClient.subscribe(this.activeDocId);
+		this.wsClient.subscribe(docId);
+		console.log(`[RealtimeSyncManager] Sent subscribe message`);
 
 		// Send our state vector to get the full document
-		this.wsClient.sendSyncStep1(this.activeDocId, crdtDoc.getStateVector());
+		this.wsClient.sendSyncStep1(docId, crdtDoc.getStateVector());
+		console.log(`[RealtimeSyncManager] Sent SyncStep1`);
 
-		console.log(`[RealtimeSyncManager] Subscribed to shared file ${resourcePath} from ${ownerId} (${this.activeDocId})`);
+		console.log(`[RealtimeSyncManager] Subscribed to shared file ${resourcePath} from ${ownerId}`);
 	}
 
 	/**
 	 * Get the current CRDT content for the active document.
 	 */
 	getActiveContent(): string | null {
-		if (!this.activeDocId) return null;
-		const crdtDoc = this.crdtManager.get(this.activeDocId);
+		if (!this.activeDoc) return null;
+		const crdtDoc = this.crdtManager.get(this.activeDoc.docId);
 		return crdtDoc?.getContent() ?? null;
 	}
 
 	/**
-	 * Apply editor changes to CRDT.
+	 * Set the entire content of the active CRDT document.
+	 * This replaces all content - use for simple editors without character-level tracking.
 	 */
-	applyEditorChange(from: number, to: number, text: string): void {
-		if (!this.activeDocId || this.isUpdatingEditor) return;
+	setActiveContent(content: string): void {
+		if (!this.activeDoc) return;
 
-		const crdtDoc = this.crdtManager.get(this.activeDocId);
+		const crdtDoc = this.crdtManager.get(this.activeDoc.docId);
 		if (!crdtDoc) return;
 
-		crdtDoc.applyChange(from, to, text);
+		crdtDoc.setContent(content);
+		this.activeDoc.lastContent = content;
+	}
+
+	/**
+	 * Handle an editor change event from the active MarkdownView.
+	 * Call this from the main plugin's editor-change handler.
+	 */
+	handleEditorChange(editor: Editor, file: TFile): void {
+		if (!this.activeDoc || this.isUpdatingEditor) return;
+
+		// Check if this is the file we're tracking
+		if (!this.activeDoc.file) return;
+		if (this.activeDoc.file.path !== file.path) return;
+
+		// Get the current content
+		const content = editor.getValue();
+
+		// Skip if content hasn't changed
+		if (content === this.activeDoc.lastContent) return;
+
+		// Update CRDT with new content
+		this.isUpdatingFromEditor = true;
+		try {
+			const crdtDoc = this.crdtManager.get(this.activeDoc.docId);
+			if (crdtDoc) {
+				crdtDoc.setContent(content);
+				this.activeDoc.lastContent = content;
+			}
+		} finally {
+			this.isUpdatingFromEditor = false;
+		}
+	}
+
+	/**
+	 * Set the cache file reference for a shared document.
+	 * Called after the cache file is created.
+	 */
+	setActiveCacheFile(file: TFile): void {
+		if (this.activeDoc) {
+			this.activeDoc.file = file;
+		}
 	}
 
 	// ========== Private Methods ==========
 
-	private registerFileOpenHandler(): void {
-		// This would be called from the main plugin to register the event
-		// The actual registration happens in the plugin's onload
-	}
-
 	private handleLocalUpdate(docId: string, update: Uint8Array): void {
 		if (!this.wsClient.isConnected()) return;
+		if (this.isUpdatingEditor) return; // Don't send updates triggered by remote changes
 
 		// Send update to server
+		console.log(`[RealtimeSyncManager] Sending local update for ${docId}, size: ${update.length}`);
 		this.wsClient.sendUpdate(docId, update);
 	}
 
 	private handleRemoteUpdate(docId: string): void {
-		if (docId !== this.activeDocId) return;
+		if (!this.activeDoc || docId !== this.activeDoc.docId) return;
 
 		const crdtDoc = this.crdtManager.get(docId);
 		if (!crdtDoc) return;
 
-		// Update editor with CRDT content
-		this.updateEditorContent(crdtDoc.getContent());
+		const content = crdtDoc.getContent();
+		console.log(`[RealtimeSyncManager] Remote update received, content length: ${content.length}`);
+
+		// Update last known content
+		this.activeDoc.lastContent = content;
+
+		// Emit event for external listeners
+		this.trigger('content-change', docId, content);
+
+		// Update the editor if it's showing this file
+		this.updateEditorContent(content);
+
+		// For shared files, also update the cache file
+		if (this.activeDoc.isShared) {
+			this.updateCacheFile(docId, content);
+		}
 	}
 
 	private updateEditorContent(content: string): void {
 		const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (!activeView) return;
+		if (!activeView?.file) return;
+
+		// Check if the active view is showing our file
+		if (!this.activeDoc?.file) return;
+		if (activeView.file.path !== this.activeDoc.file.path) return;
 
 		const editor = activeView.editor;
 		if (!editor) return;
@@ -269,6 +386,17 @@ export class RealtimeSyncManager extends Events {
 		}
 	}
 
+	private async updateCacheFile(docId: string, content: string): Promise<void> {
+		const cacheManager = this.config.getCacheManager();
+		if (!cacheManager) return;
+
+		try {
+			await cacheManager.updateCacheFile(docId, content);
+		} catch (error) {
+			console.error(`[RealtimeSyncManager] Failed to update cache file:`, error);
+		}
+	}
+
 	private handleServerMessage(message: ServerMessage): void {
 		switch (message.type) {
 			case 'subscribed':
@@ -277,18 +405,31 @@ export class RealtimeSyncManager extends Events {
 
 			case 'sync_step2': {
 				// Server sent us updates we're missing
+				console.log(`[RealtimeSyncManager] Received sync_step2 for ${message.doc_id}, update length: ${message.update.length}`);
 				const crdtDoc = this.crdtManager.get(message.doc_id);
 				if (crdtDoc) {
 					const update = decodeBase64(message.update);
+					console.log(`[RealtimeSyncManager] Decoded update length: ${update.length}`);
 					if (update.length > 0) {
 						crdtDoc.applyRemoteUpdate(update);
 					}
+					// Emit content-change for initial sync
+					const content = crdtDoc.getContent();
+					console.log(`[RealtimeSyncManager] CRDT content after sync: "${content.substring(0, 100)}..." (${content.length} chars)`);
+					
+					// Update last known content
+					if (this.activeDoc && this.activeDoc.docId === message.doc_id) {
+						this.activeDoc.lastContent = content;
+					}
+					
+					this.trigger('content-change', message.doc_id, content);
 				}
 				break;
 			}
 
 			case 'update': {
 				// Another user sent an update
+				console.log(`[RealtimeSyncManager] Received update from ${message.from_user} for ${message.doc_id}`);
 				const crdtDoc = this.crdtManager.get(message.doc_id);
 				if (crdtDoc) {
 					const update = decodeBase64(message.update);

@@ -7,8 +7,9 @@ import { CloudflareSyncSettingTab, CloudflareSyncSettings, DEFAULT_SETTINGS } fr
 import { ShareManager } from './sharing/ShareManager';
 import { PendingSharesModal, ShareModal, SharedWithMeModal } from './sharing/ShareModal';
 import { RealtimeSyncManager } from './sync/RealtimeSyncManager';
+import { SharedFileCacheManager } from './sync/SharedFileCacheManager';
 import { SyncManager } from './sync/SyncManager';
-import type { ConnectionStatus, SyncStatus } from './types';
+import type { ConnectionStatus, ShareInvite, SyncStatus } from './types';
 import { NotificationManager } from './ui/NotificationManager';
 import { registerSharedFileView } from './ui/SharedFileView';
 import { StatusBar } from './ui/StatusBar';
@@ -30,6 +31,8 @@ export default class CloudflareSyncPlugin extends Plugin {
 	private statusBar!: StatusBar;
 	private syncManager: SyncManager | null = null;
 	private realtimeSyncManager: RealtimeSyncManager | null = null;
+	private sharedFileCacheManager: SharedFileCacheManager | null = null;
+	private sharedFileMetadata: Map<string, ShareInvite> = new Map();
 
 	// Connection and sync state
 	private connectionStatus: ConnectionStatus = 'disconnected';
@@ -45,6 +48,8 @@ export default class CloudflareSyncPlugin extends Plugin {
 		this.shareManager = new ShareManager(this);
 		this.commentManager = new CommentManager(this);
 		this.statusBar = new StatusBar(this);
+		this.sharedFileCacheManager = new SharedFileCacheManager(this.app);
+		await this.sharedFileCacheManager.initialize();
 
 		// Register custom views
 		registerSharedFileView(this);
@@ -77,6 +82,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 		// Clean up managers
 		this.authManager?.cleanup();
 		this.statusBar?.cleanup();
+		this.sharedFileCacheManager?.cleanup();
 
 		// Stop any active sync
 		this.stopSync();
@@ -254,6 +260,34 @@ export default class CloudflareSyncPlugin extends Plugin {
 		return this.syncManager;
 	}
 
+	/**
+	 * Get the shared file cache manager instance
+	 */
+	getSharedFileCacheManager(): SharedFileCacheManager | null {
+		return this.sharedFileCacheManager;
+	}
+
+	/**
+	 * Store metadata for a shared file by its cache path.
+	 */
+	setSharedFileMetadata(cachePath: string, share: ShareInvite): void {
+		this.sharedFileMetadata.set(cachePath, share);
+	}
+
+	/**
+	 * Get metadata for a shared file by its cache path.
+	 */
+	getSharedFileMetadata(cachePath: string): ShareInvite | undefined {
+		return this.sharedFileMetadata.get(cachePath);
+	}
+
+	/**
+	 * Check if a file is a shared file cache.
+	 */
+	isSharedCacheFile(path: string): boolean {
+		return this.sharedFileCacheManager?.isCacheFile(path) ?? false;
+	}
+
 	// ============================================================================
 	// Real-time Sync Operations
 	// ============================================================================
@@ -277,6 +311,7 @@ export default class CloudflareSyncPlugin extends Plugin {
 				serverUrl: this.settings.serverUrl,
 				getToken: () => this.authManager.getValidToken(),
 				getUserId: () => this.authManager.getUserId(),
+				getCacheManager: () => this.sharedFileCacheManager,
 				onStatusChange: (status) => {
 					if (status === 'connected') {
 						this.notificationManager.success('Real-time sync connected');
@@ -303,12 +338,12 @@ export default class CloudflareSyncPlugin extends Plugin {
 				})
 			);
 
-			// Register editor change handler
+			// Register editor change handler - capture edits and send to CRDT
 			this.registerEvent(
 				this.app.workspace.on('editor-change', (editor, info) => {
-					// The editor-change event doesn't provide change details
-					// We'll need to handle this differently in a production app
-					// For now, we'll sync the full content periodically
+					if (this.realtimeSyncManager && info.file) {
+						this.realtimeSyncManager.handleEditorChange(editor, info.file);
+					}
 				})
 			);
 
